@@ -37,9 +37,9 @@ To run this API locally, follow these steps:
 2.  **Create and activate a virtual environment (recommended):**
     ```bash
     python -m venv venv
-    source venv/bin/activate   # On macOS and Linux
-    venv\Scripts\activate      # On Windows (Command Prompt)
-    .\venv\Scripts\Activate.ps1 # On Windows (PowerShell)
+    source venv/bin/activate     # On macOS and Linux
+    venv\Scripts\activate        # On Windows (Command Prompt)
+    .\venv\Scripts\Activate.ps1  # On Windows (PowerShell)
     ```
 
 3.  **Install the dependencies:**
@@ -96,9 +96,11 @@ Here are a few examples of how to use the API:
 
 ## Deployment
 
-This API will most likelly be deployed in:
+This API is deployed using Render.com:
 
-* **Render:** Offers free tiers for small applications.
+* **Render:** [randata.onrender.com](https://randata.onrender.com/docs).
+
+It's currently using the free tier Web Service that only have 512 MB RAM and 0.1 CPU. 
 
 ## Contributing
 
@@ -111,9 +113,9 @@ This project is licensed under the [MIT License](LICENSE).
 ## Author
 
 João Barreto
-Email: barretobit@gmx.ch
-LinkedIn: linkedin.com/in/barretobit
-GitHub: github.com/barretobit 
+* **Email:** barretobit@gmx.ch
+* **LinkedIn:** linkedin.com/in/barretobit
+* **GitHub:** github.com/barretobit 
 
 ---
 
