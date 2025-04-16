@@ -30,7 +30,7 @@ To run this API locally, follow these steps:
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/barretobit/Randata.git](https://github.com/barretobit/Randata.git)
+    git clone https://github.com/barretobit/Randata.git
     cd Randata
     ```
 
@@ -64,7 +64,7 @@ Here are a few examples of how to use the API:
 
 * **Get a random UUID:**
     ```bash
-    curl [http://127.0.0.1:8000/random/uuid](http://127.0.0.1:8000/random/uuid)
+    curl http://127.0.0.1:8000/random/uuid
     ```
     ```json
     {"uuid": "a1b2c3d4-e5f6-7890-1234-567890abcdef"}
@@ -72,7 +72,7 @@ Here are a few examples of how to use the API:
 
 * **Get a random integer between 1 and 1000:**
     ```bash
-    curl [http://127.0.0.1:8000/random/int?min=1&max=1000](http://127.0.0.1:8000/random/int?min=1&max=1000)
+    curl http://127.0.0.1:8000/random/int?min=1&max=1000
     ```
     ```json
     {"random_integer": 456}
@@ -80,7 +80,7 @@ Here are a few examples of how to use the API:
 
 * **Get a random secure password of length 25:**
     ```bash
-    curl [http://127.0.0.1:8000/random/secure-password?length=25](http://127.0.0.1:8000/random/secure-password?length=25)
+    curl http://127.0.0.1:8000/random/secure-password?length=25
     ```
     ```json
     {"secure_password": "p3!xR9zK*tLmVbSj2hYnCqWfU"}
@@ -88,7 +88,7 @@ Here are a few examples of how to use the API:
 
 * **Get a random choice from a list:**
     ```bash
-    curl "[http://127.0.0.1:8000/random/choice?items=dog,cat,bird,fish](http://127.0.0.1:8000/random/choice?items=dog,cat,bird,fish)"
+    curl http://127.0.0.1:8000/random/choice?items=dog,cat,bird,fish
     ```
     ```json
     {"random_choice": "cat"}
@@ -104,7 +104,8 @@ It's currently using the free tier Web Service that only have 512 MB RAM and 0.1
 
 ## Contributing
 
-Contributions to this project are welcome! If you have ideas for new random data generators or improvements, feel free to open an issue or submit a pull request.
+Contributions to this project are welcome! If you have ideas for new random data generators or improvements, feel free to open an issue or submit a pull request. 
+Once the pull request is approved and merged the new updated version will be deployed into: [randata.onrender.com](https://randata.onrender.com/docs)
 
 ## License
 
@@ -114,8 +115,8 @@ This project is licensed under the [MIT License](LICENSE).
 
 João Barreto
 * **Email:** barretobit@gmx.ch
-* **LinkedIn:** linkedin.com/in/barretobit
-* **GitHub:** github.com/barretobit 
+* **LinkedIn:** [linkedin.com/in/barretobit](linkedin.com/in/barretobit)
+* **GitHub:** [github.com/barretobit](github.com/barretobit) 
 
 ---
 
