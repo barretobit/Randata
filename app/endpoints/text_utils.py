@@ -28,5 +28,6 @@ async def generate_lorem_ipsum(
     words_per_paragraph: int = Query(30, ge=1, description="Number of words per paragraph")
 ):
     """Generates Lorem Ipsum placeholder text."""
-    text = lorem.paragraph(count=paragraphs, wpp=words_per_paragraph)
+    text_list = [lorem.paragraph(words_per_paragraph) for _ in range(paragraphs)]
+    text = "\n\n".join(text_list)
     return {"paragraphs": paragraphs, "words_per_paragraph": words_per_paragraph, "lorem_ipsum": text}
