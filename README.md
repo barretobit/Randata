@@ -109,7 +109,8 @@ Once the pull request is approved and merged the new updated version will be dep
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
 
 ## Author
 
@@ -117,7 +118,5 @@ João Barreto
 * **Email:** barretobit@gmx.ch
 * **LinkedIn:** [linkedin.com/in/barretobit](linkedin.com/in/barretobit)
 * **GitHub:** [github.com/barretobit](github.com/barretobit) 
-
----
 
 **Thank you for checking out Randata!**
