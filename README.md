@@ -4,6 +4,10 @@
 
 A FastAPI Service that tracks daily financial market data — FX pairs, indexes, and precious metals — sourced from Yahoo Finance and stored in a MySQL database.
 
+**Live API:** <https://randata.onrender.com> — interactive docs at <https://randata.onrender.com/docs>
+
+> Note: the live deployment currently returns `503`, so the code on Render must be re-deployed to serve the new finance API.
+
 ## Tracked Assets (24)
 
 - **FX pairs (10):** EUR/USD, GBP/USD, JPY/USD, CHF/USD, AUD/USD, CAD/USD, CNY/USD, HKD/USD, NZD/USD, SEK/USD

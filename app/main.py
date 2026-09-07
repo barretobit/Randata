@@ -17,6 +17,11 @@ app = FastAPI(
 async def root():
     return {"message": "Randata Finance API"}
 
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
 app.include_router(finance_router, prefix="/finance", tags=["Finance"])
 
 if SessionLocal is not None:
