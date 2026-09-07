@@ -1,0 +1,485 @@
+================================================================================
+RANDATA FINANCE API — IMPLEMENTATION PLAN
+================================================================================
+Target API base: https://randata.onrender.com
+Stack: Python, FastAPI (already in use)
+Database: PostgreSQL (connection string will be provided separately)
+Data source: yfinance (Yahoo Finance unofficial Python library)
+
+This document describes everything needed to extend the existing FastAPI
+application with finance-related endpoints. The person implementing this
+already has the codebase. Do not scaffold a new project — integrate into
+the existing one.
+
+Do not create or manage the database. The database and all tables will be
+provided. SQL scripts to create the tables are included at the end of this
+document for reference only.
+
+================================================================================
+SECTION 1 — DEPENDENCIES
+================================================================================
+
+Add the following to requirements.txt (or install via pip):
+
+  yfinance
+  psycopg2-binary
+  apscheduler
+  sqlalchemy
+
+SQLAlchemy will be used for DB interaction. APScheduler handles the daily
+ingestion cron job inside the FastAPI process.
+
+================================================================================
+SECTION 2 — CONFIGURATION
+================================================================================
+
+Create a file called config.py at the root of the project (or wherever
+environment config is currently handled).
+
+  DATABASE_URL = os.getenv("DATABASE_URL")  # connection string provided externally
+
+The connection string will be injected as an environment variable named
+DATABASE_URL. It follows the standard PostgreSQL format:
+  postgresql://user:password@host:port/dbname
+
+================================================================================
+SECTION 3 — DATABASE CONNECTION
+================================================================================
+
+Create a file: db.py
+
+  from sqlalchemy import create_engine, text
+  from sqlalchemy.orm import sessionmaker
+  from config import DATABASE_URL
+
+  engine = create_engine(DATABASE_URL)
+  SessionLocal = sessionmaker(bind=engine)
+
+  def get_db():
+      db = SessionLocal()
+      try:
+          yield db
+      finally:
+          db.close()
+
+This follows the standard FastAPI dependency injection pattern.
+
+================================================================================
+SECTION 4 — TRACKED ASSETS
+================================================================================
+
+These are the assets the system will track. They are defined as constants
+in a file called assets.py. Do not make this dynamic via the DB — keep it
+as a hardcoded list for simplicity and control.
+
+---- FX PAIRS (quoted against USD) ----
+
+  FX_PAIRS = [
+      {"symbol": "EURUSD=X", "name": "Euro / US Dollar",            "display": "EUR/USD"},
+      {"symbol": "GBPUSD=X", "name": "British Pound / US Dollar",   "display": "GBP/USD"},
+      {"symbol": "JPYUSD=X", "name": "Japanese Yen / US Dollar",    "display": "JPY/USD"},
+      {"symbol": "CHFUSD=X", "name": "Swiss Franc / US Dollar",     "display": "CHF/USD"},
+      {"symbol": "AUDUSD=X", "name": "Australian Dollar / US Dollar","display": "AUD/USD"},
+      {"symbol": "CADUSD=X", "name": "Canadian Dollar / US Dollar", "display": "CAD/USD"},
+      {"symbol": "CNYUSD=X", "name": "Chinese Yuan / US Dollar",    "display": "CNY/USD"},
+      {"symbol": "HKDUSD=X", "name": "Hong Kong Dollar / US Dollar","display": "HKD/USD"},
+      {"symbol": "NZDUSD=X", "name": "New Zealand Dollar / US Dollar","display":"NZD/USD"},
+      {"symbol": "SEKUSD=X", "name": "Swedish Krona / US Dollar",   "display": "SEK/USD"},
+  ]
+
+---- INDEXES ----
+
+  INDEXES = [
+      {"symbol": "^GSPC",  "name": "S&P 500",          "region": "US"},
+      {"symbol": "^IXIC",  "name": "NASDAQ Composite",  "region": "US"},
+      {"symbol": "^DJI",   "name": "Dow Jones",         "region": "US"},
+      {"symbol": "^FTSE",  "name": "FTSE 100",          "region": "UK"},
+      {"symbol": "^GDAXI", "name": "DAX",               "region": "DE"},
+      {"symbol": "^FCHI",  "name": "CAC 40",            "region": "FR"},
+      {"symbol": "^N225",  "name": "Nikkei 225",        "region": "JP"},
+      {"symbol": "^HSI",   "name": "Hang Seng",         "region": "HK"},
+      {"symbol": "^STOXX50E","name":"Euro Stoxx 50",    "region": "EU"},
+      {"symbol": "^BVSP",  "name": "Bovespa",           "region": "BR"},
+  ]
+
+---- ALL SYMBOLS (combined, used by ingestion) ----
+
+  ALL_ASSETS = FX_PAIRS + INDEXES
+
+  SYMBOL_MAP = {a["symbol"]: a for a in ALL_ASSETS}
+
+================================================================================
+SECTION 5 — DATA INGESTION
+================================================================================
+
+Create a file: ingestion.py
+
+This file contains two functions:
+  - backfill(symbol): fetches 5 years of daily history for one symbol
+  - ingest_daily(symbol): fetches only the latest trading day
+
+Both upsert into the daily_prices table. Use INSERT ... ON CONFLICT DO UPDATE
+so re-runs are idempotent.
+
+---- IMPLEMENTATION ----
+
+  import yfinance as yf
+  from datetime import date, timedelta
+  from db import SessionLocal
+  from assets import ALL_ASSETS, SYMBOL_MAP
+
+  UPSERT_SQL = """
+      INSERT INTO daily_prices (symbol, date, open, high, low, close, volume)
+      VALUES (:symbol, :date, :open, :high, :low, :close, :volume)
+      ON CONFLICT (symbol, date) DO UPDATE SET
+          open   = EXCLUDED.open,
+          high   = EXCLUDED.high,
+          low    = EXCLUDED.low,
+          close  = EXCLUDED.close,
+          volume = EXCLUDED.volume
+  """
+
+  def _fetch_and_store(symbol: str, period: str):
+      ticker = yf.Ticker(symbol)
+      df = ticker.history(period=period, interval="1d", auto_adjust=True)
+      if df.empty:
+          return 0
+      db = SessionLocal()
+      count = 0
+      try:
+          for ts, row in df.iterrows():
+              db.execute(UPSERT_SQL, {
+                  "symbol": symbol,
+                  "date":   ts.date(),
+                  "open":   float(row["Open"])   if row["Open"]   == row["Open"] else None,
+                  "high":   float(row["High"])   if row["High"]   == row["High"] else None,
+                  "low":    float(row["Low"])    if row["Low"]    == row["Low"]  else None,
+                  "close":  float(row["Close"])  if row["Close"]  == row["Close"]else None,
+                  "volume": int(row["Volume"])   if row["Volume"] == row["Volume"]else None,
+              })
+              count += 1
+          db.commit()
+      finally:
+          db.close()
+      return count
+
+  def backfill(symbol: str):
+      return _fetch_and_store(symbol, period="5y")
+
+  def ingest_daily(symbol: str):
+      return _fetch_and_store(symbol, period="5d")  # fetch 5 days, upsert handles dedup
+
+  def backfill_all():
+      results = {}
+      for asset in ALL_ASSETS:
+          try:
+              n = backfill(asset["symbol"])
+              results[asset["symbol"]] = n
+          except Exception as e:
+              results[asset["symbol"]] = f"ERROR: {e}"
+      return results
+
+  def ingest_daily_all():
+      results = {}
+      for asset in ALL_ASSETS:
+          try:
+              n = ingest_daily(asset["symbol"])
+              results[asset["symbol"]] = n
+          except Exception as e:
+              results[asset["symbol"]] = f"ERROR: {e}"
+      return results
+
+NOTE: NaN check uses `row["X"] == row["X"]` — this is intentional. NaN != NaN
+in Python/pandas, so this is the simplest way to filter NaN values without
+importing math or numpy.
+
+================================================================================
+SECTION 6 — SCHEDULER (DAILY CRON)
+================================================================================
+
+The scheduler runs inside the FastAPI app using APScheduler. It triggers
+ingest_daily_all() every weekday at 23:00 UTC (after US market close + buffer).
+
+Add the following to main.py (or wherever the FastAPI app is instantiated):
+
+  from apscheduler.schedulers.background import BackgroundScheduler
+  from ingestion import ingest_daily_all
+
+  scheduler = BackgroundScheduler(timezone="UTC")
+  scheduler.add_job(ingest_daily_all, "cron", day_of_week="mon-fri", hour=23, minute=0)
+  scheduler.start()
+
+Shutdown the scheduler gracefully on app exit:
+
+  import atexit
+  atexit.register(lambda: scheduler.shutdown())
+
+================================================================================
+SECTION 7 — API ENDPOINTS
+================================================================================
+
+Create a file: routers/finance.py
+
+Register it in main.py:
+
+  from routers.finance import router as finance_router
+  app.include_router(finance_router, prefix="/finance", tags=["Finance"])
+
+---- FULL ROUTER IMPLEMENTATION ----
+
+  from fastapi import APIRouter, Depends, HTTPException, Query
+  from sqlalchemy.orm import Session
+  from db import get_db
+  from assets import FX_PAIRS, INDEXES, SYMBOL_MAP
+  from ingestion import backfill_all, ingest_daily_all
+  from datetime import date
+
+  router = APIRouter()
+
+  # ── helpers ──────────────────────────────────────────────────────────────────
+
+  def _latest(symbol: str, db: Session):
+      row = db.execute(
+          "SELECT date, open, high, low, close, volume "
+          "FROM daily_prices WHERE symbol = :s ORDER BY date DESC LIMIT 1",
+          {"s": symbol}
+      ).fetchone()
+      return row
+
+  def _history(symbol: str, db: Session, limit: int = None):
+      sql = ("SELECT date, open, high, low, close, volume "
+             "FROM daily_prices WHERE symbol = :s ORDER BY date ASC")
+      if limit:
+          sql += f" LIMIT {limit}"
+      return db.execute(sql, {"s": symbol}).fetchall()
+
+  def _row_to_dict(row):
+      if row is None:
+          return None
+      return {
+          "date":   str(row.date),
+          "open":   row.open,
+          "high":   row.high,
+          "low":    row.low,
+          "close":  row.close,
+          "volume": row.volume,
+      }
+
+  # ── FX endpoints ─────────────────────────────────────────────────────────────
+
+  @router.get("/fx/rates")
+  def get_all_fx_rates(db: Session = Depends(get_db)):
+      """Latest rate for all tracked FX pairs."""
+      result = []
+      for pair in FX_PAIRS:
+          row = _latest(pair["symbol"], db)
+          result.append({
+              "symbol":  pair["symbol"],
+              "display": pair["display"],
+              "name":    pair["name"],
+              "latest":  _row_to_dict(row),
+          })
+      return result
+
+  @router.get("/fx/rates/{pair}")
+  def get_fx_rate(pair: str, db: Session = Depends(get_db)):
+      """Latest rate for a specific FX pair. Example: EURUSD"""
+      symbol = f"{pair.upper()}=X"
+      if symbol not in SYMBOL_MAP:
+          raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
+      row = _latest(symbol, db)
+      meta = SYMBOL_MAP[symbol]
+      return {
+          "symbol":  symbol,
+          "display": meta["display"],
+          "name":    meta["name"],
+          "latest":  _row_to_dict(row),
+      }
+
+  @router.get("/fx/history/{pair}")
+  def get_fx_history(pair: str, db: Session = Depends(get_db)):
+      """5-year daily history for a specific FX pair. Example: EURUSD"""
+      symbol = f"{pair.upper()}=X"
+      if symbol not in SYMBOL_MAP:
+          raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
+      rows = _history(symbol, db)
+      meta = SYMBOL_MAP[symbol]
+      return {
+          "symbol":  symbol,
+          "display": meta["display"],
+          "name":    meta["name"],
+          "count":   len(rows),
+          "history": [_row_to_dict(r) for r in rows],
+      }
+
+  # ── Indexes endpoints ─────────────────────────────────────────────────────────
+
+  @router.get("/indexes")
+  def get_all_indexes(db: Session = Depends(get_db)):
+      """Latest value for all tracked indexes."""
+      result = []
+      for idx in INDEXES:
+          row = _latest(idx["symbol"], db)
+          result.append({
+              "symbol": idx["symbol"],
+              "name":   idx["name"],
+              "region": idx["region"],
+              "latest": _row_to_dict(row),
+          })
+      return result
+
+  @router.get("/indexes/{symbol}")
+  def get_index(symbol: str, db: Session = Depends(get_db)):
+      """
+      Latest value for a specific index.
+      Symbol examples: GSPC (S&P 500), IXIC (NASDAQ), FTSE, GDAXI, N225
+      The ^ prefix is added automatically.
+      """
+      full_symbol = f"^{symbol.upper()}"
+      if full_symbol not in SYMBOL_MAP:
+          raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
+      row = _latest(full_symbol, db)
+      meta = SYMBOL_MAP[full_symbol]
+      return {
+          "symbol": full_symbol,
+          "name":   meta["name"],
+          "region": meta["region"],
+          "latest": _row_to_dict(row),
+      }
+
+  @router.get("/indexes/{symbol}/history")
+  def get_index_history(symbol: str, db: Session = Depends(get_db)):
+      """5-year daily history for a specific index."""
+      full_symbol = f"^{symbol.upper()}"
+      if full_symbol not in SYMBOL_MAP:
+          raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
+      rows = _history(full_symbol, db)
+      meta = SYMBOL_MAP[full_symbol]
+      return {
+          "symbol":  full_symbol,
+          "name":    meta["name"],
+          "region":  meta["region"],
+          "count":   len(rows),
+          "history": [_row_to_dict(r) for r in rows],
+      }
+
+  # ── Meta endpoints ────────────────────────────────────────────────────────────
+
+  @router.get("/last-updated")
+  def get_last_updated(db: Session = Depends(get_db)):
+      """Returns the most recent date present in the database for each symbol."""
+      rows = db.execute(
+          "SELECT symbol, MAX(date) as last_date FROM daily_prices GROUP BY symbol ORDER BY symbol"
+      ).fetchall()
+      return [{"symbol": r.symbol, "last_date": str(r.last_date)} for r in rows]
+
+  @router.get("/assets")
+  def list_assets():
+      """Returns the full list of tracked symbols and their metadata."""
+      return {
+          "fx_pairs": FX_PAIRS,
+          "indexes":  INDEXES,
+      }
+
+  # ── Admin endpoints ───────────────────────────────────────────────────────────
+  # IMPORTANT: Protect these endpoints with an API key or remove before making
+  # the API public. They trigger expensive operations.
+
+  @router.post("/admin/backfill")
+  def run_backfill():
+      """Backfills 5 years of history for all tracked assets. Slow — run once."""
+      results = backfill_all()
+      return {"status": "done", "rows_inserted": results}
+
+  @router.post("/admin/ingest-daily")
+  def run_daily_ingest():
+      """Manually triggers the daily ingestion job."""
+      results = ingest_daily_all()
+      return {"status": "done", "rows_inserted": results}
+
+================================================================================
+SECTION 8 — SQL TABLE CREATION SCRIPTS
+================================================================================
+
+These scripts are provided for the database administrator to run manually.
+The application itself does NOT create or migrate tables.
+
+---- TABLE: daily_prices ----
+
+  CREATE TABLE IF NOT EXISTS daily_prices (
+      id        BIGSERIAL PRIMARY KEY,
+      symbol    VARCHAR(20)    NOT NULL,
+      date      DATE           NOT NULL,
+      open      NUMERIC(18, 6),
+      high      NUMERIC(18, 6),
+      low       NUMERIC(18, 6),
+      close     NUMERIC(18, 6),
+      volume    BIGINT,
+      CONSTRAINT uq_symbol_date UNIQUE (symbol, date)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_daily_prices_symbol ON daily_prices (symbol);
+  CREATE INDEX IF NOT EXISTS idx_daily_prices_date   ON daily_prices (date DESC);
+
+Notes:
+- NUMERIC(18, 6) handles both FX rates (e.g. 0.000079 for JPY) and index
+  values (e.g. 5823.40 for S&P 500) without precision loss.
+- The UNIQUE constraint on (symbol, date) makes upserts safe and idempotent.
+- No separate assets table is needed — asset metadata lives in assets.py.
+
+================================================================================
+SECTION 9 — FILE STRUCTURE SUMMARY
+================================================================================
+
+Files to create or modify:
+
+  [NEW]      assets.py              — tracked symbols and metadata
+  [NEW]      ingestion.py           — yfinance fetch + DB upsert logic
+  [NEW]      db.py                  — SQLAlchemy engine and session
+  [NEW]      routers/finance.py     — all finance API endpoints
+  [MODIFY]   main.py                — register router, start scheduler
+  [MODIFY]   requirements.txt       — add yfinance, apscheduler, sqlalchemy
+  [MODIFY]   config.py (or .env)    — add DATABASE_URL
+
+================================================================================
+SECTION 10 — FIRST-RUN CHECKLIST
+================================================================================
+
+1. Install new dependencies (pip install -r requirements.txt)
+2. Set the DATABASE_URL environment variable on Render (or .env locally)
+3. Ensure the database tables are created (run the SQL in Section 8)
+4. Deploy the updated application
+5. Call POST /finance/admin/backfill once to load 5 years of history
+   (this will take a few minutes — yfinance fetches each symbol sequentially)
+6. Verify data with GET /finance/last-updated
+7. The daily scheduler will run automatically every weekday at 23:00 UTC
+
+================================================================================
+SECTION 11 — NOTES AND CAVEATS
+================================================================================
+
+- yfinance uses Yahoo Finance data unofficially. It is free and requires no
+  API key, but Yahoo can break it without notice. It is suitable for personal
+  projects and internal tools. Do not rely on it for commercial or regulated
+  financial applications without a proper data vendor agreement.
+
+- FX pairs returned by yfinance via the =X suffix are mid-market rates from
+  Yahoo Finance, which sources from various providers. They are approximate
+  and should not be used for transactional FX purposes.
+
+- Volume for FX pairs will often be 0 or null — this is expected. Yahoo does
+  not provide true FX volume. The field is kept for schema consistency.
+
+- The admin endpoints (backfill, ingest-daily) should be protected before
+  exposing the API publicly. A simple approach is to check for a secret header:
+    if request.headers.get("X-Admin-Key") != os.getenv("ADMIN_KEY"):
+        raise HTTPException(status_code=403)
+
+- APScheduler runs in the same process as FastAPI. On Render's free tier,
+  the service sleeps after inactivity, which may cause the scheduler to miss
+  its window. Consider upgrading to a paid instance or using Render's native
+  cron job feature as a fallback that calls POST /finance/admin/ingest-daily.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
