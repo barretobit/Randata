@@ -2,6 +2,7 @@ import atexit
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .db import SessionLocal
 from .ingestion import ingest_daily_all
@@ -11,6 +12,13 @@ app = FastAPI(
     title="Randata Finance API",
     description="Daily financial data (FX pairs, indexes, and precious metals) sourced from Yahoo Finance and stored in MySQL.",
     version="1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 @app.get("/")
