@@ -4,9 +4,7 @@
 
 A FastAPI Service that tracks daily financial market data — FX pairs, indexes, and precious metals — sourced from Yahoo Finance and stored in a MySQL database. Includes Swiss favorites like the SMI. 🇨🇭
 
-**Live API:** <https://randata.onrender.com> — interactive docs at <https://randata.onrender.com/docs>
-
-> Note: the live deployment currently returns `503`, so the code on Render must be re-deployed to serve the new finance API.
+**Live API:** <https://randata.onrender.com>
 
 ## Tracked Assets (25)
 
@@ -33,7 +31,6 @@ A FastAPI Service that tracks daily financial market data — FX pairs, indexes,
 | GET    | `/finance/symbol/{symbol}/history`  | Full history for any stored symbol                                     |
 | GET    | `/finance/assets`                   | Full list of tracked assets                                            |
 | GET    | `/finance/last-updated`             | Most recent stored date per asset                                      |
-| GET    | `/finance/ingest-daily`             | Run the daily fetch now for all assets                                 |
 | GET    | `/finance/db-check`                 | Database connectivity diagnostic                                       |
 | POST   | `/finance/admin/backfill`           | Backfill 5 years of history for all assets                             |
 | POST   | `/finance/admin/ingest-daily`       | Daily fetch for all assets (admin-gated)                               |

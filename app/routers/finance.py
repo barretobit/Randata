@@ -2,12 +2,12 @@ from datetime import date, datetime, timezone
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..assets import ALL_ASSETS, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, SYMBOL_MAP
 from ..config import ADMIN_KEY, DATABASE_URL
-from ..db import get_db
+from ..db import engine, get_db
 from ..ingestion import backfill, backfill_all, ingest_daily_all
 
 router = APIRouter()
@@ -26,13 +26,15 @@ def _latest(symbol: str, db: Session):
 
 
 def _history(symbol: str, db: Session, limit: int = None):
-    base = (
+    sql = (
         "SELECT date, open, high, low, close, volume "
         "FROM daily_prices WHERE symbol = :symbol ORDER BY date ASC"
     )
+    params = {"symbol": symbol}
     if limit:
-        base += f" LIMIT {int(limit)}"
-    return db.execute(text(base), {"symbol": symbol}).fetchall()
+        sql += " LIMIT :limit"
+        params["limit"] = int(limit)
+    return db.execute(text(sql), params).fetchall()
 
 
 def _row_to_dict(row):
@@ -51,72 +53,6 @@ def _row_to_dict(row):
 def require_admin(request: Request):
     if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key.")
-
-
-@router.get(
-    "/backfill",
-    summary="Fetch 5 years of history now (all assets)",
-    description=(
-        "Downloads ~5 years of daily data from Yahoo Finance for **all 24 tracked assets** and "
-        "stores it in the database. Takes several minutes to run. "
-        "Upserts (re-running simply updates existing rows).\n\n"
-        "Returns the number of rows written per asset plus the latest stored value for each."
-    ),
-    responses=_resp({
-        "status": "done",
-        "fetched_at": "2026-09-08T12:00:00+00:00",
-        "results": [
-            {"symbol": "EURUSD=X", "name": "Euro / US Dollar", "rows_written": 1300,
-             "latest": {"date": "2026-09-08", "open": 1.162791, "high": 1.163873,
-                        "low": 1.160000, "close": 1.161710, "volume": 0}},
-        ],
-    }),
-)
-def fetch_backfill_all(db: Session = Depends(get_db)):
-    results = backfill_all()
-    summary = []
-    for asset in ALL_ASSETS:
-        row = _latest(asset["symbol"], db)
-        summary.append({
-            "symbol":       asset["symbol"],
-            "name":         asset["name"],
-            "rows_written": results.get(asset["symbol"]),
-            "latest":       _row_to_dict(row),
-        })
-    return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(), "results": summary}
-
-
-@router.get(
-    "/ingest-daily",
-    summary="Fetch and store the latest trading days now (all assets)",
-    description=(
-        "Downloads the most recent trading days from Yahoo Finance for **all 24 tracked assets** "
-        "and stores them. Same work the automatic scheduler does at 23:00 UTC on weekdays. "
-        "Upserts; existing rows are updated with fresh values.\n\n"
-        "Returns the number of rows written per asset plus the latest stored value for each."
-    ),
-    responses=_resp({
-        "status": "done",
-        "fetched_at": "2026-09-08T12:00:00+00:00",
-        "results": [
-            {"symbol": "GC=F", "name": "Gold", "rows_written": 5,
-             "latest": {"date": "2026-09-08", "open": 4466.5, "high": 4488.8,
-                        "low": 4426.2, "close": 4443.5, "volume": 127903}},
-        ],
-    }),
-)
-def fetch_daily_all(db: Session = Depends(get_db)):
-    results = ingest_daily_all()
-    summary = []
-    for asset in ALL_ASSETS:
-        row = _latest(asset["symbol"], db)
-        summary.append({
-            "symbol":      asset["symbol"],
-            "name":        asset["name"],
-            "rows_written": results.get(asset["symbol"]),
-            "latest":      _row_to_dict(row),
-        })
-    return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(), "results": summary}
 
 
 @router.get(
@@ -151,7 +87,6 @@ def db_check():
         "username": parsed.username,
     }
     try:
-        engine = create_engine(DATABASE_URL, connect_args={"connect_timeout": 15})
         with engine.connect() as conn:
             db_row = conn.execute(text("SELECT DATABASE(), VERSION()")).fetchone()
             user_row = conn.execute(
@@ -347,7 +282,7 @@ def get_index(
     }),
 )
 def get_index_history(
-    symbol: str = Path(..., description="Index code without the `^` prefix.", examples=["IXIC", "HSI", "BVSP"]),
+    symbol: str = Path(..., description="Index code without the `^` prefix.", examples=["IXIC", "HSI", "GDAXI"]),
     db: Session = Depends(get_db),
 ):
     full_symbol = f"^{symbol.upper()}"
@@ -677,37 +612,66 @@ def get_symbol_history(
     return result
 
 
+def _ingestion_summary(db: Session, results):
+    summary = []
+    for asset in ALL_ASSETS:
+        row = _latest(asset["symbol"], db)
+        summary.append({
+            "symbol":       asset["symbol"],
+            "name":         asset["name"],
+            "rows_written": results.get(asset["symbol"]),
+            "latest":       _row_to_dict(row),
+        })
+    return summary
+
+
 @router.post(
     "/admin/backfill",
     summary="Backfill 5 years of history (admin)",
     description=(
-        "Triggers the full 5-year backfill. Protected by the `X-Admin-Key` header "
-        "(send the value of the `ADMIN_KEY` environment variable). Takes several minutes."
+        "Triggers the full 5-year backfill for **all tracked assets** and stores the data in the "
+        "database. Protected by the `X-Admin-Key` header (send the value of the `ADMIN_KEY` "
+        "environment variable). Takes several minutes.\n\n"
+        "Returns the number of rows written per asset plus the latest stored value for each."
     ),
     responses=_resp({
         "status": "done",
-        "rows_inserted": {"EURUSD=X": 1300, "GC=F": 1257},
+        "fetched_at": "2026-09-08T12:00:00+00:00",
+        "results": [
+            {"symbol": "EURUSD=X", "name": "Euro / US Dollar", "rows_written": 1300,
+             "latest": {"date": "2026-09-08", "open": 1.162791, "high": 1.163873,
+                        "low": 1.160000, "close": 1.161710, "volume": 0}},
+        ],
     }),
     dependencies=[Depends(require_admin)],
 )
-def run_backfill():
+def run_backfill(db: Session = Depends(get_db)):
     results = backfill_all()
-    return {"status": "done", "rows_inserted": results}
+    return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "results": _ingestion_summary(db, results)}
 
 
 @router.post(
     "/admin/ingest-daily",
     summary="Run daily ingestion now (admin)",
     description=(
-        "Triggers the daily fetch for all assets immediately. Protected by the `X-Admin-Key` header "
-        "(send the value of the `ADMIN_KEY` environment variable)."
+        "Triggers the daily fetch for all assets immediately — the same work the automatic "
+        "scheduler does at 23:00 UTC on weekdays. Protected by the `X-Admin-Key` header (send the "
+        "value of the `ADMIN_KEY` environment variable).\n\n"
+        "Returns the number of rows written per asset plus the latest stored value for each."
     ),
     responses=_resp({
         "status": "done",
-        "rows_inserted": {"EURUSD=X": 5, "GC=F": 4},
+        "fetched_at": "2026-09-08T12:00:00+00:00",
+        "results": [
+            {"symbol": "GC=F", "name": "Gold", "rows_written": 5,
+             "latest": {"date": "2026-09-08", "open": 4466.5, "high": 4488.8,
+                        "low": 4426.2, "close": 4443.5, "volume": 127903}},
+        ],
     }),
     dependencies=[Depends(require_admin)],
 )
-def run_daily_ingest():
+def run_daily_ingest(db: Session = Depends(get_db)):
     results = ingest_daily_all()
-    return {"status": "done", "rows_inserted": results}
+    return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "results": _ingestion_summary(db, results)}

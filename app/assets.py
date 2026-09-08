@@ -20,9 +20,8 @@ INDEXES = [
     {"symbol": "^FCHI",  "name": "CAC 40",            "region": "FR"},
     {"symbol": "^N225",  "name": "Nikkei 225",        "region": "JP"},
     {"symbol": "^HSI",   "name": "Hang Seng",         "region": "HK"},
-{"symbol": "^STOXX50E","name":"Euro Stoxx 50",    "region": "EU"},
+    {"symbol": "^STOXX50E", "name": "Euro Stoxx 50",  "region": "EU"},
     {"symbol": "^SSMI",   "name": "SMI",              "region": "CH"},
-    {"symbol": "^BVSP",   "name": "Bovespa",           "region": "BR"},
 ]
 
 PRECIOUS_METALS = [
