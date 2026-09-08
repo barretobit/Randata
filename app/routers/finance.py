@@ -1,12 +1,10 @@
 from datetime import date, datetime, timezone
-from urllib.parse import urlparse
-
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..assets import ALL_ASSETS, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, SYMBOL_MAP
-from ..config import ADMIN_KEY, DATABASE_URL
+from ..config import ADMIN_KEY
 from ..db import engine, get_db
 from ..ingestion import backfill, backfill_all, ingest_daily_all
 
@@ -53,62 +51,6 @@ def _row_to_dict(row):
 def require_admin(request: Request):
     if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key.")
-
-
-@router.get(
-    "/db-check",
-    summary="Database connectivity diagnostic",
-    description=(
-        "Opens a fresh connection to the MySQL database and reports version, connection user, "
-        "source IP and table list. Mainly useful for troubleshooting."
-    ),
-    responses=_resp({
-        "configured": True,
-        "host": "db67037.public.databaseasp.net",
-        "port": 3306,
-        "database": "db67037",
-        "username": "db67037",
-        "connected": True,
-        "server_version": "10.11.15-MariaDB-log",
-        "current_user": "db67037@%",
-        "source_address": "74.220.51.161:24001",
-        "tables": ["daily_prices"],
-    }),
-)
-def db_check():
-    if not DATABASE_URL:
-        return {"configured": False, "detail": "DATABASE_URL is not configured."}
-    parsed = urlparse(DATABASE_URL)
-    result = {
-        "configured": True,
-        "host": parsed.hostname,
-        "port": parsed.port,
-        "database": parsed.path.lstrip("/"),
-        "username": parsed.username,
-    }
-    try:
-        with engine.connect() as conn:
-            db_row = conn.execute(text("SELECT DATABASE(), VERSION()")).fetchone()
-            user_row = conn.execute(
-                text("SELECT CURRENT_USER(), @@hostname, @@version_comment")
-            ).fetchone()
-            tables = [r[0] for r in conn.execute(text("SHOW TABLES")).fetchall()]
-            src = conn.execute(
-                text("SELECT HOST FROM information_schema.PROCESSLIST WHERE ID = CONNECTION_ID()")
-            ).fetchone()
-        result["connected"] = True
-        result["database"] = db_row[0]
-        result["server_version"] = db_row[1]
-        result["current_user"] = user_row[0]
-        result["server_hostname"] = user_row[1]
-        result["version_comment"] = user_row[2]
-        result["source_address"] = src[0] if src else None
-        result["tables"] = tables
-    except Exception as e:
-        result["connected"] = False
-        result["error_type"] = type(e).__name__
-        result["error_message"] = str(e)
-    return result
 
 
 @router.get(
