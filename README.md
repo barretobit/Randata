@@ -2,16 +2,16 @@
 
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A FastAPI Service that tracks daily financial market data — FX pairs, indexes, and precious metals — sourced from Yahoo Finance and stored in a MySQL database.
+A FastAPI Service that tracks daily financial market data — FX pairs, indexes, and precious metals — sourced from Yahoo Finance and stored in a MySQL database. Includes Swiss favorites like the SMI. 🇨🇭
 
 **Live API:** <https://randata.onrender.com> — interactive docs at <https://randata.onrender.com/docs>
 
 > Note: the live deployment currently returns `503`, so the code on Render must be re-deployed to serve the new finance API.
 
-## Tracked Assets (24)
+## Tracked Assets (25)
 
 - **FX pairs (10):** EUR/USD, GBP/USD, JPY/USD, CHF/USD, AUD/USD, CAD/USD, CNY/USD, HKD/USD, NZD/USD, SEK/USD
-- **Indexes (10):** S&P 500, NASDAQ Composite, Dow Jones, FTSE 100, DAX, CAC 40, Nikkei 225, Hang Seng, Euro Stoxx 50, Bovespa
+- **Indexes (11):** S&P 500, NASDAQ Composite, Dow Jones, FTSE 100, DAX, CAC 40, Nikkei 225, Hang Seng, Euro Stoxx 50, SMI, Bovespa
 - **Precious metals (4):** Gold (XAU), Silver (XAG), Platinum (XPT), Palladium (XPD)
 
 ## Endpoints
@@ -29,12 +29,15 @@ A FastAPI Service that tracks daily financial market data — FX pairs, indexes,
 | GET    | `/finance/metals/{metal}/history`   | 5-year daily history for one metal                                     |
 | GET    | `/finance/history/all`              | Full dump — every stored bar, all assets (default cap 50,000 rows)     |
 | GET    | `/finance/history/range?from&to`    | Every bar between two inclusive dates, all assets (`YYYY-MM-DD`)       |
+| GET    | `/finance/symbol/{symbol}`          | Latest bar for any stored symbol (incl. ad-hoc additions)              |
+| GET    | `/finance/symbol/{symbol}/history`  | Full history for any stored symbol                                     |
 | GET    | `/finance/assets`                   | Full list of tracked assets                                            |
 | GET    | `/finance/last-updated`             | Most recent stored date per asset                                      |
 | GET    | `/finance/ingest-daily`             | Run the daily fetch now for all assets                                 |
 | GET    | `/finance/db-check`                 | Database connectivity diagnostic                                       |
 | POST   | `/finance/admin/backfill`           | Backfill 5 years of history for all assets                             |
 | POST   | `/finance/admin/ingest-daily`       | Daily fetch for all assets (admin-gated)                               |
+| GET    | `/finance/admin/backfill-symbol`    | Backfill 5 years for one arbitrary Yahoo symbol (admin-gated)          |
 
 Admin endpoints require the `X-Admin-Key` header when `ADMIN_KEY` is set in the environment.
 

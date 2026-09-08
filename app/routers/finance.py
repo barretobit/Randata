@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..assets import ALL_ASSETS, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, SYMBOL_MAP
 from ..config import ADMIN_KEY, DATABASE_URL
 from ..db import get_db
-from ..ingestion import backfill_all, ingest_daily_all
+from ..ingestion import backfill, backfill_all, ingest_daily_all
 
 router = APIRouter()
 
@@ -571,6 +571,110 @@ def list_assets():
         "indexes":         INDEXES,
         "precious_metals": PRECIOUS_METALS,
     }
+
+
+@router.get(
+    "/admin/backfill-symbol",
+    summary="Backfill 5 years for a single symbol (admin)",
+    description=(
+        "Downloads and stores ~5 years of daily data for **one arbitrary Yahoo Finance symbol** — "
+        "the way to add a new instrument without restarting or editing the asset list.\n\n"
+        "`symbol` is any valid Yahoo Finance ticker (e.g. `^VIX`, `LTC-USD`, `GC=F`). "
+        "Upserts, so re-running just refreshes existing rows. Takes ~1 minute."
+    ),
+    responses=_resp({
+        "status": "done",
+        "symbol": "^VIX",
+        "rows_written": 1250,
+        "latest": {"date": "2026-09-08", "open": 15.2, "high": 15.5,
+                   "low": 14.8, "close": 15.1, "volume": 120000},
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def run_backfill_symbol(
+    symbol: str = Query(..., description="Yahoo Finance symbol to backfill.", examples=["^VIX", "LTC-USD"]),
+    db: Session = Depends(get_db),
+):
+    rows = backfill(symbol)
+    return {
+        "status": "done" if rows > 0 else "no_data",
+        "symbol": symbol,
+        "rows_written": rows,
+        "latest": _row_to_dict(_latest(symbol, db)),
+    }
+
+
+@router.get(
+    "/symbol/{symbol}",
+    summary="Latest bar for any stored symbol",
+    description=(
+        "Most recent daily bar for **any** symbol present in the database — works for the "
+        "hardcoded instruments as well as ad-hoc symbols added via `/finance/admin/backfill-symbol`.\n\n"
+        "6404 if the symbol has no stored data."
+    ),
+    responses=_resp({
+        "symbol": "LTC-USD",
+        "latest": {"date": "2026-09-08", "open": 102.5, "high": 104.0,
+                   "low": 101.8, "close": 103.2, "volume": 50000},
+    }),
+)
+def get_symbol(
+    symbol: str = Path(..., description="Exact Yahoo Finance symbol stored in the database.", examples=["^VIX", "LTC-USD"]),
+    db: Session = Depends(get_db),
+):
+    row = _latest(symbol, db)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
+    result = {"symbol": symbol, "latest": _row_to_dict(row)}
+    meta = SYMBOL_MAP.get(symbol)
+    if meta:
+        result["name"] = meta.get("name")
+        if "display" in meta:
+            result["display"] = meta["display"]
+        if "region" in meta:
+            result["region"] = meta["region"]
+        if "unit" in meta:
+            result["unit"] = meta["unit"]
+    return result
+
+
+@router.get(
+    "/symbol/{symbol}/history",
+    summary="Full history for any stored symbol",
+    description=(
+        "All stored daily bars (oldest first) for **any** symbol present in the database — "
+        "hardcoded instruments or ad-hoc symbols added via `/finance/admin/backfill-symbol`.\n\n"
+        "Returns 404 if the symbol has no stored data."
+    ),
+    responses=_resp({
+        "symbol": "LTC-USD",
+        "count": 1200,
+        "history": [
+            {"date": "2021-09-09", "open": 195.0, "high": 198.5, "low": 194.0,
+             "close": 196.2, "volume": 400000},
+            {"date": "2026-09-08", "open": 102.5, "high": 104.0, "low": 101.8,
+             "close": 103.2, "volume": 50000},
+        ],
+    }),
+)
+def get_symbol_history(
+    symbol: str = Path(..., description="Exact Yahoo Finance symbol stored in the database.", examples=["^VIX", "GC=F"]),
+    db: Session = Depends(get_db),
+):
+    rows = _history(symbol, db)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
+    result = {"symbol": symbol, "count": len(rows), "history": [_row_to_dict(r) for r in rows]}
+    meta = SYMBOL_MAP.get(symbol)
+    if meta:
+        result["name"] = meta.get("name")
+        if "display" in meta:
+            result["display"] = meta["display"]
+        if "region" in meta:
+            result["region"] = meta["region"]
+        if "unit" in meta:
+            result["unit"] = meta["unit"]
+    return result
 
 
 @router.post(
