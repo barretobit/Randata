@@ -27,6 +27,8 @@ A FastAPI Service that tracks daily financial market data — FX pairs, indexes,
 | GET    | `/finance/metals`                   | Latest price for all metals                                            |
 | GET    | `/finance/metals/{metal}`           | Latest price for one metal (`gold`, `silver`, `platinum`, `palladium`) |
 | GET    | `/finance/metals/{metal}/history`   | 5-year daily history for one metal                                     |
+| GET    | `/finance/history/all`              | Full dump — every stored bar, all assets (default cap 50,000 rows)     |
+| GET    | `/finance/history/range?from&to`    | Every bar between two inclusive dates, all assets (`YYYY-MM-DD`)       |
 | GET    | `/finance/assets`                   | Full list of tracked assets                                            |
 | GET    | `/finance/last-updated`             | Most recent stored date per asset                                      |
 | GET    | `/finance/ingest-daily`             | Run the daily fetch now for all assets                                 |

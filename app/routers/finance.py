@@ -1,7 +1,7 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,10 @@ from ..db import get_db
 from ..ingestion import backfill_all, ingest_daily_all
 
 router = APIRouter()
+
+
+def _resp(example, description="Successful response"):
+    return {200: {"description": description, "content": {"application/json": {"example": example}}}}
 
 
 def _latest(symbol: str, db: Session):
@@ -49,9 +53,26 @@ def require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Invalid admin key.")
 
 
-@router.get("/backfill")
+@router.get(
+    "/backfill",
+    summary="Fetch 5 years of history now (all assets)",
+    description=(
+        "Downloads ~5 years of daily data from Yahoo Finance for **all 24 tracked assets** and "
+        "stores it in the database. Takes several minutes to run. "
+        "Upserts (re-running simply updates existing rows).\n\n"
+        "Returns the number of rows written per asset plus the latest stored value for each."
+    ),
+    responses=_resp({
+        "status": "done",
+        "fetched_at": "2026-09-08T12:00:00+00:00",
+        "results": [
+            {"symbol": "EURUSD=X", "name": "Euro / US Dollar", "rows_written": 1300,
+             "latest": {"date": "2026-09-08", "open": 1.162791, "high": 1.163873,
+                        "low": 1.160000, "close": 1.161710, "volume": 0}},
+        ],
+    }),
+)
 def fetch_backfill_all(db: Session = Depends(get_db)):
-    """Backfills ~5 years of history for ALL assets and returns the stored results."""
     results = backfill_all()
     summary = []
     for asset in ALL_ASSETS:
@@ -65,9 +86,26 @@ def fetch_backfill_all(db: Session = Depends(get_db)):
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(), "results": summary}
 
 
-@router.get("/ingest-daily")
+@router.get(
+    "/ingest-daily",
+    summary="Fetch and store the latest trading days now (all assets)",
+    description=(
+        "Downloads the most recent trading days from Yahoo Finance for **all 24 tracked assets** "
+        "and stores them. Same work the automatic scheduler does at 23:00 UTC on weekdays. "
+        "Upserts; existing rows are updated with fresh values.\n\n"
+        "Returns the number of rows written per asset plus the latest stored value for each."
+    ),
+    responses=_resp({
+        "status": "done",
+        "fetched_at": "2026-09-08T12:00:00+00:00",
+        "results": [
+            {"symbol": "GC=F", "name": "Gold", "rows_written": 5,
+             "latest": {"date": "2026-09-08", "open": 4466.5, "high": 4488.8,
+                        "low": 4426.2, "close": 4443.5, "volume": 127903}},
+        ],
+    }),
+)
 def fetch_daily_all(db: Session = Depends(get_db)):
-    """Runs the daily fetch now for ALL tracked assets and returns the stored values."""
     results = ingest_daily_all()
     summary = []
     for asset in ALL_ASSETS:
@@ -81,9 +119,27 @@ def fetch_daily_all(db: Session = Depends(get_db)):
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(), "results": summary}
 
 
-@router.get("/db-check")
+@router.get(
+    "/db-check",
+    summary="Database connectivity diagnostic",
+    description=(
+        "Opens a fresh connection to the MySQL database and reports version, connection user, "
+        "source IP and table list. Mainly useful for troubleshooting."
+    ),
+    responses=_resp({
+        "configured": True,
+        "host": "db67037.public.databaseasp.net",
+        "port": 3306,
+        "database": "db67037",
+        "username": "db67037",
+        "connected": True,
+        "server_version": "10.11.15-MariaDB-log",
+        "current_user": "db67037@%",
+        "source_address": "74.220.51.161:24001",
+        "tables": ["daily_prices"],
+    }),
+)
 def db_check():
-    """Diagnostic - opens a fresh connection to the database and reports the result."""
     if not DATABASE_URL:
         return {"configured": False, "detail": "DATABASE_URL is not configured."}
     parsed = urlparse(DATABASE_URL)
@@ -120,9 +176,20 @@ def db_check():
     return result
 
 
-@router.get("/fx/rates")
+@router.get(
+    "/fx/rates",
+    summary="Latest rate for all FX pairs",
+    description="Returns the most recent daily bar for every tracked FX pair, in order.",
+    responses=_resp([
+        {"symbol": "EURUSD=X", "display": "EURUSD", "name": "Euro / US Dollar",
+         "latest": {"date": "2026-09-08", "open": 1.162791, "high": 1.163873,
+                    "low": 1.160000, "close": 1.161710, "volume": 0}},
+        {"symbol": "GBPUSD=X", "display": "GBPUSD", "name": "British Pound / US Dollar",
+         "latest": {"date": "2026-09-08", "open": 1.354224, "high": 1.355326,
+                    "low": 1.352265, "close": 1.354536, "volume": 0}},
+    ]),
+)
 def get_all_fx_rates(db: Session = Depends(get_db)):
-    """Latest rate for all tracked FX pairs."""
     result = []
     for pair in FX_PAIRS:
         row = _latest(pair["symbol"], db)
@@ -135,9 +202,25 @@ def get_all_fx_rates(db: Session = Depends(get_db)):
     return result
 
 
-@router.get("/fx/rates/{pair}")
-def get_fx_rate(pair: str, db: Session = Depends(get_db)):
-    """Latest rate for a specific FX pair. Example: EURUSD"""
+@router.get(
+    "/fx/rates/{pair}",
+    summary="Latest rate for one FX pair",
+    description=(
+        "Latest daily bar for a single pair. The pair code is given **without** the currency "
+        "notation and is case-insensitive; `=X` is appended automatically."
+    ),
+    responses=_resp({
+        "symbol": "EURUSD=X",
+        "display": "EURUSD",
+        "name": "Euro / US Dollar",
+        "latest": {"date": "2026-09-08", "open": 1.162791, "high": 1.163873,
+                   "low": 1.160000, "close": 1.161710, "volume": 0},
+    }),
+)
+def get_fx_rate(
+    pair: str = Path(..., description="Pair code without the `=X` suffix.", examples=["EURUSD", "JPYUSD"]),
+    db: Session = Depends(get_db),
+):
     symbol = f"{pair.upper()}=X"
     if symbol not in SYMBOL_MAP:
         raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
@@ -151,9 +234,28 @@ def get_fx_rate(pair: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/fx/history/{pair}")
-def get_fx_history(pair: str, db: Session = Depends(get_db)):
-    """5-year daily history for a specific FX pair. Example: EURUSD"""
+@router.get(
+    "/fx/history/{pair}",
+    summary="Full history for one FX pair",
+    description=(
+        "All stored daily bars (oldest first) for a single FX pair. "
+        "With a fresh backfill this covers roughly 5 years."
+    ),
+    responses=_resp({
+        "symbol": "EURUSD=X",
+        "display": "EURUSD",
+        "name": "Euro / US Dollar",
+        "count": 1300,
+        "history": [
+            {"date": "2021-09-09", "open": 1.1810, "high": 1.1840, "low": 1.1800, "close": 1.1825, "volume": 0},
+            {"date": "2026-09-08", "open": 1.1628, "high": 1.1639, "low": 1.1600, "close": 1.1617, "volume": 0},
+        ],
+    }),
+)
+def get_fx_history(
+    pair: str = Path(..., description="Pair code without the `=X` suffix.", examples=["GBPUSD", "CHFUSD"]),
+    db: Session = Depends(get_db),
+):
     symbol = f"{pair.upper()}=X"
     if symbol not in SYMBOL_MAP:
         raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
@@ -168,9 +270,20 @@ def get_fx_history(pair: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/indexes")
+@router.get(
+    "/indexes",
+    summary="Latest value for all indexes",
+    description="Returns the most recent daily bar for every tracked stock index, in order.",
+    responses=_resp([
+        {"symbol": "^GSPC", "name": "S&P 500", "region": "US",
+         "latest": {"date": "2026-09-04", "open": 7750.190, "high": 7750.190,
+                    "low": 7706.120, "close": 7718.600, "volume": 4103570000}},
+        {"symbol": "^N225", "name": "Nikkei 225", "region": "JP",
+         "latest": {"date": "2026-09-08", "open": 65843.688, "high": 66791.844,
+                    "low": 65269.328, "close": 65269.328, "volume": 0}},
+    ]),
+)
 def get_all_indexes(db: Session = Depends(get_db)):
-    """Latest value for all tracked indexes."""
     result = []
     for idx in INDEXES:
         row = _latest(idx["symbol"], db)
@@ -183,13 +296,25 @@ def get_all_indexes(db: Session = Depends(get_db)):
     return result
 
 
-@router.get("/indexes/{symbol}")
-def get_index(symbol: str, db: Session = Depends(get_db)):
-    """
-    Latest value for a specific index.
-    Symbol examples: GSPC (S&P 500), IXIC (NASDAQ), FTSE, GDAXI, N225
-    The ^ prefix is added automatically.
-    """
+@router.get(
+    "/indexes/{symbol}",
+    summary="Latest value for one index",
+    description=(
+        "Latest daily bar for a single index. Provide the symbol **without** the `^` prefix "
+        "(added automatically), case-insensitive."
+    ),
+    responses=_resp({
+        "symbol": "^GSPC",
+        "name": "S&P 500",
+        "region": "US",
+        "latest": {"date": "2026-09-04", "open": 7750.190, "high": 7750.190,
+                   "low": 7706.120, "close": 7718.600, "volume": 4103570000},
+    }),
+)
+def get_index(
+    symbol: str = Path(..., description="Index code without the `^` prefix.", examples=["GSPC", "N225", "GDAXI"]),
+    db: Session = Depends(get_db),
+):
     full_symbol = f"^{symbol.upper()}"
     if full_symbol not in SYMBOL_MAP:
         raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
@@ -203,9 +328,28 @@ def get_index(symbol: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/indexes/{symbol}/history")
-def get_index_history(symbol: str, db: Session = Depends(get_db)):
-    """5-year daily history for a specific index."""
+@router.get(
+    "/indexes/{symbol}/history",
+    summary="Full history for one index",
+    description=(
+        "All stored daily bars (oldest first) for a single index. "
+        "With a fresh backfill this covers roughly 5 years."
+    ),
+    responses=_resp({
+        "symbol": "^GSPC",
+        "name": "S&P 500",
+        "region": "US",
+        "count": 1255,
+        "history": [
+            {"date": "2021-09-09", "open": 4500.0, "high": 4520.0, "low": 4495.0, "close": 4512.5, "volume": 3900000000},
+            {"date": "2026-09-04", "open": 7750.2, "high": 7750.2, "low": 7706.1, "close": 7718.6, "volume": 4103570000},
+        ],
+    }),
+)
+def get_index_history(
+    symbol: str = Path(..., description="Index code without the `^` prefix.", examples=["IXIC", "HSI", "BVSP"]),
+    db: Session = Depends(get_db),
+):
     full_symbol = f"^{symbol.upper()}"
     if full_symbol not in SYMBOL_MAP:
         raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
@@ -220,9 +364,20 @@ def get_index_history(symbol: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/metals")
+@router.get(
+    "/metals",
+    summary="Latest price for all precious metals",
+    description="Returns the most recent daily bar for Gold, Silver, Platinum and Palladium.",
+    responses=_resp([
+        {"symbol": "GC=F", "display": "XAU", "name": "Gold", "unit": "USD per troy ounce",
+         "latest": {"date": "2026-09-08", "open": 4466.5, "high": 4488.8,
+                    "low": 4426.2, "close": 4443.5, "volume": 127903}},
+        {"symbol": "SI=F", "display": "XAG", "name": "Silver", "unit": "USD per troy ounce",
+         "latest": {"date": "2026-09-08", "open": 66.735, "high": 67.835,
+                    "low": 66.025, "close": 66.735, "volume": 27451}},
+    ]),
+)
 def get_all_metals(db: Session = Depends(get_db)):
-    """Latest price for all tracked precious metals."""
     result = []
     for metal in PRECIOUS_METALS:
         row = _latest(metal["symbol"], db)
@@ -236,12 +391,26 @@ def get_all_metals(db: Session = Depends(get_db)):
     return result
 
 
-@router.get("/metals/{metal}")
-def get_metal(metal: str, db: Session = Depends(get_db)):
-    """
-    Latest price for a specific precious metal.
-    Example: gold, silver, platinum, palladium
-    """
+@router.get(
+    "/metals/{metal}",
+    summary="Latest price for one precious metal",
+    description=(
+        "Latest daily bar for a single precious metal, addressed by short name "
+        "(`gold`, `silver`, `platinum`, `palladium`), case-insensitive."
+    ),
+    responses=_resp({
+        "symbol": "GC=F",
+        "display": "XAU",
+        "name": "Gold",
+        "unit": "USD per troy ounce",
+        "latest": {"date": "2026-09-08", "open": 4466.5, "high": 4488.8,
+                   "low": 4426.2, "close": 4443.5, "volume": 127903},
+    }),
+)
+def get_metal(
+    metal: str = Path(..., description="Metal name: gold, silver, platinum or palladium.", examples=["gold", "silver"]),
+    db: Session = Depends(get_db),
+):
     asset = METAL_MAP.get(metal.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Precious metal '{metal}' not tracked.")
@@ -255,9 +424,29 @@ def get_metal(metal: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/metals/{metal}/history")
-def get_metal_history(metal: str, db: Session = Depends(get_db)):
-    """5-year daily history for a specific precious metal."""
+@router.get(
+    "/metals/{metal}/history",
+    summary="Full history for one precious metal",
+    description=(
+        "All stored daily bars (oldest first) for a single precious metal. "
+        "With a fresh backfill this covers roughly 5 years."
+    ),
+    responses=_resp({
+        "symbol": "GC=F",
+        "display": "XAU",
+        "name": "Gold",
+        "unit": "USD per troy ounce",
+        "count": 1257,
+        "history": [
+            {"date": "2021-09-09", "open": 1790.0, "high": 1805.0, "low": 1785.5, "close": 1794.2, "volume": 120000},
+            {"date": "2026-09-08", "open": 4466.5, "high": 4488.8, "low": 4426.2, "close": 4443.5, "volume": 127903},
+        ],
+    }),
+)
+def get_metal_history(
+    metal: str = Path(..., description="Metal name: gold, silver, platinum or palladium.", examples=["platinum", "palladium"]),
+    db: Session = Depends(get_db),
+):
     asset = METAL_MAP.get(metal.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Precious metal '{metal}' not tracked.")
@@ -272,18 +461,111 @@ def get_metal_history(metal: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/last-updated")
+@router.get(
+    "/history/all",
+    summary="Dump: all history for all assets",
+    description=(
+        "Returns **every stored daily bar** for every asset in one response, "
+        "sorted by symbol then date (oldest first). Each entry contains the `symbol` plus "
+        "`date, open, high, low, close, volume`.\n\n"
+        "This is the big export endpoint — the default cap is 50,000 rows "
+        "(the full 5-year dataset is ~31,000)."
+    ),
+    responses=_resp({
+        "count": 2,
+        "from": "2021-09-09",
+        "to": "2026-09-08",
+        "data": [
+            {"symbol": "EURUSD=X", "date": "2021-09-09", "open": 1.1810, "high": 1.1840,
+             "low": 1.1800, "close": 1.1825, "volume": 0},
+            {"symbol": "EURUSD=X", "date": "2026-09-08", "open": 1.1628, "high": 1.1639,
+             "low": 1.1600, "close": 1.1617, "volume": 0},
+        ],
+    }),
+)
+def get_history_all(
+    limit: int = Query(50000, ge=1, le=500000, description="Maximum number of rows to return."),
+    db: Session = Depends(get_db),
+):
+    rows = db.execute(
+        text(
+            "SELECT symbol, date, open, high, low, close, volume "
+            "FROM daily_prices ORDER BY symbol, date ASC LIMIT :limit"
+        ),
+        {"limit": limit},
+    ).fetchall()
+    data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
+    first = data[0] if data else None
+    last = data[-1] if data else None
+    return {"count": len(data), "from": first["date"] if first else None,
+            "to": last["date"] if last else None, "data": data}
+
+
+@router.get(
+    "/history/range",
+    summary="History between two dates (all assets)",
+    description=(
+        "Returns every stored daily bar **between two inclusive dates** for every asset, "
+        "sorted by symbol then date. Both query parameters are required, format `YYYY-MM-DD`.\n\n"
+        "Example: `?from=2024-01-01&to=2024-12-31` gives all assets for the 2024 calendar year."
+    ),
+    responses=_resp({
+        "count": 2,
+        "from": "2024-01-02",
+        "to": "2024-01-03",
+        "data": [
+            {"symbol": "EURUSD=X", "date": "2024-01-02", "open": 1.0940, "high": 1.0960,
+             "low": 1.0920, "close": 1.0950, "volume": 0},
+            {"symbol": "GC=F", "date": "2024-01-03", "open": 2045.0, "high": 2060.0,
+             "low": 2040.0, "close": 2052.5, "volume": 150000},
+        ],
+    }),
+)
+def get_history_range(
+    from_date: date = Query(..., alias="from", description="Start date, inclusive. Format `YYYY-MM-DD`.", examples=["2024-01-01"]),
+    to_date: date = Query(..., alias="to", description="End date, inclusive. Format `YYYY-MM-DD`.", examples=["2024-12-31"]),
+    db: Session = Depends(get_db),
+):
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="'from' must be less than or equal to 'to'.")
+    rows = db.execute(
+        text(
+            "SELECT symbol, date, open, high, low, close, volume "
+            "FROM daily_prices WHERE date BETWEEN :from AND :to ORDER BY symbol, date ASC"
+        ),
+        {"from": from_date, "to": to_date},
+    ).fetchall()
+    data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
+    return {"count": len(data), "from": str(from_date), "to": str(to_date), "data": data}
+
+
+@router.get(
+    "/last-updated",
+    summary="Most recent stored date per asset",
+    description="Returns the latest date available in the database for each symbol — a quick way to verify the daily fetch ran.",
+    responses=_resp([
+        {"symbol": "EURUSD=X", "last_date": "2026-09-08"},
+        {"symbol": "GC=F", "last_date": "2026-09-08"},
+    ]),
+)
 def get_last_updated(db: Session = Depends(get_db)):
-    """Returns the most recent date present in the database for each symbol."""
     rows = db.execute(
         text("SELECT symbol, MAX(date) AS last_date FROM daily_prices GROUP BY symbol ORDER BY symbol")
     ).fetchall()
     return [{"symbol": r.symbol, "last_date": str(r.last_date)} for r in rows]
 
 
-@router.get("/assets")
+@router.get(
+    "/assets",
+    summary="List all tracked assets",
+    description="Returns the full catalogue of tracked symbols grouped by asset class, with metadata (display code, region, unit).",
+    responses=_resp({
+        "fx_pairs": [{"symbol": "EURUSD=X", "display": "EURUSD", "name": "Euro / US Dollar"}],
+        "indexes": [{"symbol": "^GSPC", "name": "S&P 500", "region": "US"}],
+        "precious_metals": [{"symbol": "GC=F", "display": "XAU", "name": "Gold", "unit": "USD per troy ounce"}],
+    }),
+)
 def list_assets():
-    """Returns the full list of tracked symbols and their metadata."""
     return {
         "fx_pairs":        FX_PAIRS,
         "indexes":         INDEXES,
@@ -291,15 +573,37 @@ def list_assets():
     }
 
 
-@router.post("/admin/backfill", dependencies=[Depends(require_admin)])
+@router.post(
+    "/admin/backfill",
+    summary="Backfill 5 years of history (admin)",
+    description=(
+        "Triggers the full 5-year backfill. Protected by the `X-Admin-Key` header "
+        "(send the value of the `ADMIN_KEY` environment variable). Takes several minutes."
+    ),
+    responses=_resp({
+        "status": "done",
+        "rows_inserted": {"EURUSD=X": 1300, "GC=F": 1257},
+    }),
+    dependencies=[Depends(require_admin)],
+)
 def run_backfill():
-    """Backfills 5 years of history for all tracked assets. Slow - run once."""
     results = backfill_all()
     return {"status": "done", "rows_inserted": results}
 
 
-@router.post("/admin/ingest-daily", dependencies=[Depends(require_admin)])
+@router.post(
+    "/admin/ingest-daily",
+    summary="Run daily ingestion now (admin)",
+    description=(
+        "Triggers the daily fetch for all assets immediately. Protected by the `X-Admin-Key` header "
+        "(send the value of the `ADMIN_KEY` environment variable)."
+    ),
+    responses=_resp({
+        "status": "done",
+        "rows_inserted": {"EURUSD=X": 5, "GC=F": 4},
+    }),
+    dependencies=[Depends(require_admin)],
+)
 def run_daily_ingest():
-    """Manually triggers the daily ingestion job."""
     results = ingest_daily_all()
     return {"status": "done", "rows_inserted": results}
