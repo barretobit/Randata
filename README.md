@@ -114,6 +114,11 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/last-updated`             | Most recent stored date per asset                                 |
 | GET    | `/finance/cache/status`             | In-memory cache stats                                             |
 | GET    | `/finance/cache/all`                | All data straight from the cache (no DB hit)                      |
+| GET    | `/finance/cache/stocks`             | All stock histories from the cache (no DB hit)                    |
+| GET    | `/finance/cache/indexes`            | All index histories from the cache (no DB hit)                    |
+| GET    | `/finance/cache/metals`             | All metal histories from the cache (no DB hit)                    |
+| GET    | `/finance/cache/etfs`               | All ETF histories from the cache (no DB hit)                      |
+| GET    | `/finance/cache/cryptos`            | All crypto histories from the cache (no DB hit)                   |
 | GET    | `/finance/cache/{symbol}`           | One symbol's history from the cache                               |
 
 ## Admin endpoints (require `X-Admin-Key` when `ADMIN_KEY` is set)
@@ -128,6 +133,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing ~5y history (gentle pacing, no rate-limit risk) |
 | POST   | `/finance/admin/backfill`                 | **Medium** backfill of ALL assets (throttled ~2s between symbols)                          |
 | POST   | `/finance/admin/ingest-daily`             | Run the daily fetch now                                                                    |
+| GET    | `/finance/admin/cache/details`            | Detailed cache report (per-symbol coverage, rows, estimated memory)                        |
 | GET    | `/finance/logs`                           | Recent ingestion logs (last 7 days)                                                        |
 
 Admin endpoints require the `X-Admin-Key` header when `ADMIN_KEY` is set in the environment.
@@ -141,6 +147,30 @@ The scheduler runs the daily fetch automatically on weekdays at:
 | Zürich (CET/CEST)  | 00:00 next day (winter) / 01:00 next day (summer) |
 | New York (EST/EDT) | 18:00 (winter) / 19:00 (summer)                   |
 | Tokyo (JST)        | 08:00 next day (no DST)                           |
+
+## In-memory cache
+
+All stored `daily_prices` rows are loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages.
+
+- **Memory footprint:** ~116 assets × ~1,300 bars ≈ 150k rows ≈ **~70 MB** (grows ~52 KB/day from the daily fetch — negligible).
+- **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data, so stale data is never served during a fetch cycle.
+- **Monitoring:** `GET /finance/cache/status` (public) gives quick stats; `GET /finance/admin/cache/details` (admin) gives per-symbol coverage and an estimated memory footprint — handy to confirm the cache rebuilt correctly after a deploy.
+
+> Note: the cache is in-process, so every deploy starts fresh and rebuilds from the database in a few seconds.
+
+## Compression
+
+The API applies **gzip compression** (via `GZipMiddleware`, level 5) to every response ≥ 1 KB for clients that advertise `Accept-Encoding: gzip` (all browsers and `curl`).
+
+Because JSON is highly repetitive, this reduces payload sizes by roughly **75-80%**:
+
+| Endpoint                  | Uncompressed | Gzipped (approx.) |
+| ------------------------- | ------------ | ----------------- |
+| `/finance/cache/all`      | ~15.3 MB     | ~3-3.5 MB         |
+| `/finance/cache/stocks`   | ~9.6 MB      | ~2 MB             |
+| `/finance/cache/{symbol}` | ~130 KB      | ~30 KB            |
+
+This is especially relevant on Render's free tier, which caps outbound HTTP bandwidth at **5 GB/month**, per-symbol or per-asset-class calls use ~100× less bandwidth than the full dump.
 
 ## License
 
