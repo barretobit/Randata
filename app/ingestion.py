@@ -24,7 +24,6 @@ UPSERT_SQL = text(
 def _fetch_and_store(symbol: str, period: str) -> int:
     start = time.perf_counter()
     count = 0
-    error = None
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval="1d", auto_adjust=True)
@@ -50,21 +49,18 @@ def _fetch_and_store(symbol: str, period: str) -> int:
         logger.info("Stored %d rows for %s (period=%s)", count, symbol, period)
         return count
     except Exception as e:
-        error = str(e)
-        raise
-    finally:
         duration_ms = int((time.perf_counter() - start) * 1000)
-        msg = f"Fetch failed for {symbol}" if error else f"Fetched {symbol} (period={period})"
         log_event(
-            "ERROR" if error else "INFO",
-            msg,
+            "ERROR",
+            f"Failed to fetch/store {symbol} (period={period}, duration={duration_ms}ms): {type(e).__name__}: {e}",
             logger_name="ingestion",
             symbol=symbol,
             duration_ms=duration_ms,
-            rows_written=count if not error else None,
-            success=error is None,
-            exception=error,
+            rows_written=count if count > 0 else None,
+            success=False,
+            exception=f"{type(e).__name__}: {e}",
         )
+        raise
 
 
 def backfill(symbol: str) -> int:
