@@ -1,14 +1,26 @@
 from datetime import date, datetime, timezone
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..assets import ALL_ASSETS, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, SYMBOL_MAP
+from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets
+from ..assets import ALL_ASSETS, CRYPTO, CRYPTO_MAP, ETFS, ETF_MAP, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, STOCKS, STOCK_MAP, SYMBOL_MAP
+from ..cache import get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
 from ..config import ADMIN_KEY
 from ..db import engine, get_db
-from ..ingestion import backfill, backfill_all, ingest_daily_all
+from ..ingestion import backfill, backfill_all, backfill_missing, check_symbol, ingest_daily_all
 
 router = APIRouter()
+
+
+class AddAssetRequest(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    asset_type: Optional[str] = None
+    properties: Optional[dict] = None
 
 
 def _resp(example, description="Successful response"):
@@ -339,6 +351,254 @@ def get_metal_history(
 
 
 @router.get(
+    "/stocks",
+    summary="Latest price for all stocks",
+    description="Returns the most recent daily bar for every tracked stock.",
+    responses=_resp([
+        {"symbol": "NVDA", "name": "NVIDIA",
+         "latest": {"date": "2026-09-08", "open": 220.0, "high": 225.0,
+                    "low": 218.0, "close": 223.67, "volume": 50000000}},
+        {"symbol": "AAPL", "name": "Apple",
+         "latest": {"date": "2026-09-08", "open": 313.0, "high": 316.0,
+                    "low": 312.0, "close": 315.34, "volume": 30000000}},
+    ]),
+)
+def get_all_stocks(db: Session = Depends(get_db)):
+    result = []
+    for stock in STOCKS:
+        row = _latest(stock["symbol"], db)
+        result.append({
+            "symbol": stock["symbol"],
+            "name":   stock["name"],
+            "latest": _row_to_dict(row),
+        })
+    return result
+
+
+@router.get(
+    "/stocks/{symbol}",
+    summary="Latest price for one stock",
+    description="Latest daily bar for a single stock, addressed by ticker symbol (e.g. `NVDA`, `AAPL`).",
+    responses=_resp({
+        "symbol": "NVDA",
+        "name": "NVIDIA",
+        "latest": {"date": "2026-09-08", "open": 220.0, "high": 225.0,
+                   "low": 218.0, "close": 223.67, "volume": 50000000},
+    }),
+)
+def get_stock(
+    symbol: str = Path(..., description="Stock ticker symbol.", examples=["NVDA", "AAPL"]),
+    db: Session = Depends(get_db),
+):
+    asset = STOCK_MAP.get(symbol.lower())
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Stock '{symbol}' not tracked.")
+    row = _latest(asset["symbol"], db)
+    return {
+        "symbol": asset["symbol"],
+        "name":   asset["name"],
+        "latest": _row_to_dict(row),
+    }
+
+
+@router.get(
+    "/stocks/{symbol}/history",
+    summary="Full history for one stock",
+    description="All stored daily bars (oldest first) for a single stock.",
+    responses=_resp({
+        "symbol": "NVDA",
+        "name": "NVIDIA",
+        "count": 1257,
+        "history": [
+            {"date": "2021-09-09", "open": 220.0, "high": 225.0, "low": 218.0, "close": 222.5, "volume": 40000000},
+            {"date": "2026-09-08", "open": 220.0, "high": 225.0, "low": 218.0, "close": 223.67, "volume": 50000000},
+        ],
+    }),
+)
+def get_stock_history(
+    symbol: str = Path(..., description="Stock ticker symbol.", examples=["NVDA", "AAPL"]),
+    db: Session = Depends(get_db),
+):
+    asset = STOCK_MAP.get(symbol.lower())
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Stock '{symbol}' not tracked.")
+    rows = _history(asset["symbol"], db)
+    return {
+        "symbol": asset["symbol"],
+        "name":   asset["name"],
+        "count":  len(rows),
+        "history": [_row_to_dict(r) for r in rows],
+    }
+
+
+@router.get(
+    "/etfs",
+    summary="Latest price for all ETFs",
+    description="Returns the most recent daily bar for every tracked ETF.",
+    responses=_resp([
+        {"symbol": "VOO", "name": "Vanguard S&P 500 ETF",
+         "latest": {"date": "2026-09-08", "open": 585.0, "high": 590.0,
+                    "low": 582.0, "close": 588.9, "volume": 4000000}},
+        {"symbol": "QQQ", "name": "Invesco Nasdaq-100 ETF",
+         "latest": {"date": "2026-09-08", "open": 560.0, "high": 565.0,
+                    "low": 557.0, "close": 563.4, "volume": 40000000}},
+    ]),
+)
+def get_all_etfs(db: Session = Depends(get_db)):
+    result = []
+    for etf in ETFS:
+        row = _latest(etf["symbol"], db)
+        result.append({
+            "symbol": etf["symbol"],
+            "name":   etf["name"],
+            "latest": _row_to_dict(row),
+        })
+    return result
+
+
+@router.get(
+    "/etfs/{symbol}",
+    summary="Latest price for one ETF",
+    description="Latest daily bar for a single ETF, addressed by ticker symbol (e.g. `VOO`, `QQQ`).",
+    responses=_resp({
+        "symbol": "VOO",
+        "name": "Vanguard S&P 500 ETF",
+        "latest": {"date": "2026-09-08", "open": 585.0, "high": 590.0,
+                   "low": 582.0, "close": 588.9, "volume": 4000000},
+    }),
+)
+def get_etf(
+    symbol: str = Path(..., description="ETF ticker symbol.", examples=["VOO", "QQQ"]),
+    db: Session = Depends(get_db),
+):
+    asset = ETF_MAP.get(symbol.lower())
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"ETF '{symbol}' not tracked.")
+    row = _latest(asset["symbol"], db)
+    return {
+        "symbol": asset["symbol"],
+        "name":   asset["name"],
+        "latest": _row_to_dict(row),
+    }
+
+
+@router.get(
+    "/etfs/{symbol}/history",
+    summary="Full history for one ETF",
+    description="All stored daily bars (oldest first) for a single ETF.",
+    responses=_resp({
+        "symbol": "VOO",
+        "name": "Vanguard S&P 500 ETF",
+        "count": 1257,
+        "history": [
+            {"date": "2021-09-09", "open": 400.0, "high": 405.0, "low": 398.0, "close": 402.5, "volume": 3000000},
+            {"date": "2026-09-08", "open": 585.0, "high": 590.0, "low": 582.0, "close": 588.9, "volume": 4000000},
+        ],
+    }),
+)
+def get_etf_history(
+    symbol: str = Path(..., description="ETF ticker symbol.", examples=["VOO", "QQQ"]),
+    db: Session = Depends(get_db),
+):
+    asset = ETF_MAP.get(symbol.lower())
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"ETF '{symbol}' not tracked.")
+    rows = _history(asset["symbol"], db)
+    return {
+        "symbol": asset["symbol"],
+        "name":   asset["name"],
+        "count":  len(rows),
+        "history": [_row_to_dict(r) for r in rows],
+    }
+
+
+@router.get(
+    "/crypto",
+    summary="Latest price for all cryptocurrencies",
+    description="Returns the most recent daily bar for every tracked cryptocurrency.",
+    responses=_resp([
+        {"symbol": "BTC-USD", "display": "BTC", "name": "Bitcoin",
+         "latest": {"date": "2026-09-08", "open": 110000.0, "high": 112000.0,
+                    "low": 109000.0, "close": 111500.0, "volume": 30000000000}},
+        {"symbol": "ETH-USD", "display": "ETH", "name": "Ethereum",
+         "latest": {"date": "2026-09-08", "open": 4200.0, "high": 4300.0,
+                    "low": 4150.0, "close": 4250.0, "volume": 15000000000}},
+    ]),
+)
+def get_all_crypto(db: Session = Depends(get_db)):
+    result = []
+    for coin in CRYPTO:
+        row = _latest(coin["symbol"], db)
+        result.append({
+            "symbol":  coin["symbol"],
+            "display": coin["display"],
+            "name":    coin["name"],
+            "latest":  _row_to_dict(row),
+        })
+    return result
+
+
+@router.get(
+    "/crypto/{symbol}",
+    summary="Latest price for one cryptocurrency",
+    description="Latest daily bar for a single cryptocurrency, addressed by ticker (e.g. `BTC-USD`, `ETH-USD`).",
+    responses=_resp({
+        "symbol": "BTC-USD",
+        "display": "BTC",
+        "name": "Bitcoin",
+        "latest": {"date": "2026-09-08", "open": 110000.0, "high": 112000.0,
+                   "low": 109000.0, "close": 111500.0, "volume": 30000000000},
+    }),
+)
+def get_crypto(
+    symbol: str = Path(..., description="Crypto ticker symbol.", examples=["BTC-USD", "ETH-USD"]),
+    db: Session = Depends(get_db),
+):
+    asset = CRYPTO_MAP.get(symbol.lower())
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Cryptocurrency '{symbol}' not tracked.")
+    row = _latest(asset["symbol"], db)
+    return {
+        "symbol":  asset["symbol"],
+        "display": asset["display"],
+        "name":    asset["name"],
+        "latest":  _row_to_dict(row),
+    }
+
+
+@router.get(
+    "/crypto/{symbol}/history",
+    summary="Full history for one cryptocurrency",
+    description="All stored daily bars (oldest first) for a single cryptocurrency.",
+    responses=_resp({
+        "symbol": "BTC-USD",
+        "display": "BTC",
+        "name": "Bitcoin",
+        "count": 1257,
+        "history": [
+            {"date": "2021-09-09", "open": 46000.0, "high": 47000.0, "low": 45500.0, "close": 46500.0, "volume": 25000000000},
+            {"date": "2026-09-08", "open": 110000.0, "high": 112000.0, "low": 109000.0, "close": 111500.0, "volume": 30000000000},
+        ],
+    }),
+)
+def get_crypto_history(
+    symbol: str = Path(..., description="Crypto ticker symbol.", examples=["BTC-USD", "ETH-USD"]),
+    db: Session = Depends(get_db),
+):
+    asset = CRYPTO_MAP.get(symbol.lower())
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Cryptocurrency '{symbol}' not tracked.")
+    rows = _history(asset["symbol"], db)
+    return {
+        "symbol":  asset["symbol"],
+        "display": asset["display"],
+        "name":    asset["name"],
+        "count":   len(rows),
+        "history": [_row_to_dict(r) for r in rows],
+    }
+
+
+@router.get(
     "/history/all",
     summary="Dump: all history for all assets",
     description=(
@@ -440,6 +700,9 @@ def get_last_updated(db: Session = Depends(get_db)):
         "fx_pairs": [{"symbol": "EURUSD=X", "display": "EURUSD", "name": "Euro / US Dollar"}],
         "indexes": [{"symbol": "^GSPC", "name": "S&P 500", "region": "US"}],
         "precious_metals": [{"symbol": "GC=F", "display": "XAU", "name": "Gold", "unit": "USD per troy ounce"}],
+        "stocks": [{"symbol": "NVDA", "name": "NVIDIA"}],
+        "etfs": [{"symbol": "VOO", "name": "Vanguard S&P 500 ETF"}],
+        "crypto": [{"symbol": "BTC-USD", "display": "BTC", "name": "Bitcoin"}],
     }),
 )
 def list_assets():
@@ -447,17 +710,23 @@ def list_assets():
         "fx_pairs":        FX_PAIRS,
         "indexes":         INDEXES,
         "precious_metals": PRECIOUS_METALS,
+        "stocks":          STOCKS,
+        "etfs":            ETFS,
+        "crypto":          CRYPTO,
     }
 
 
 @router.get(
     "/admin/backfill-symbol",
-    summary="Backfill 5 years for a single symbol (admin)",
+    summary="Backfill 5 years for a single symbol (admin, fast)",
     description=(
-        "Downloads and stores ~5 years of daily data for **one arbitrary Yahoo Finance symbol** — "
-        "the way to add a new instrument without restarting or editing the asset list.\n\n"
+        "**Fast path:** downloads ~5 years of daily data for **one arbitrary Yahoo Finance symbol** "
+        "in a single request — the way to add a new instrument without restarting or editing the "
+        "asset list. Because it hits Yahoo once, no inter-request throttling is needed; it still "
+        "retries with exponential backoff if rate limited.\n\n"
         "`symbol` is any valid Yahoo Finance ticker (e.g. `^VIX`, `LTC-USD`, `GC=F`). "
-        "Upserts, so re-running just refreshes existing rows. Takes ~1 minute."
+        "Upserts, so re-running just refreshes existing rows. Takes ~1 minute.\n\n"
+        "For bulk/backfilling-many use the slow endpoint `POST /finance/admin/backfill-missing`."
     ),
     responses=_resp({
         "status": "done",
@@ -473,6 +742,138 @@ def run_backfill_symbol(
     db: Session = Depends(get_db),
 ):
     rows = backfill(symbol)
+    if rows > 0:
+        invalidate_cache()
+        refresh_cache()
+    return {
+        "status": "done" if rows > 0 else "no_data",
+        "symbol": symbol,
+        "rows_written": rows,
+        "latest": _row_to_dict(_latest(symbol, db)),
+    }
+
+
+@router.get(
+    "/admin/assets",
+    summary="List all tracked assets from the database (admin)",
+    description=(
+        "Returns every asset stored in the `assets` table — the source of truth the "
+        "backfill and daily ingestion now iterate over. Protected by the `X-Admin-Key` header."
+    ),
+    responses=_resp({
+        "assets": [
+            {"symbol": "EURUSD=X", "name": "Euro / US Dollar", "asset_type": "fx",
+             "properties": {"display": "EUR/USD"}},
+        ],
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def list_tracked_assets(db: Session = Depends(get_db)):
+    return {"assets": get_tracked_assets(db)}
+
+
+@router.get(
+    "/admin/assets/check",
+    summary="Verify a symbol exists on Yahoo Finance (admin)",
+    description=(
+        "Combines `yf.Ticker().info` and `yf.download()`: the symbol is considered valid "
+        "if **either** source returns data (avoids false negatives when one path is rate "
+        "limited or empty). Also suggests a display name and an asset category."
+    ),
+    responses=_resp({
+        "symbol": "LTC-USD",
+        "exists": True,
+        "confirmed_by": ["yf.Ticker.info", "yf.download"],
+        "name": "Litecoin",
+        "suggested_type": "crypto",
+        "latest_close": 103.2,
+        "note": None,
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def check_asset_symbol(
+    symbol: str = Query(..., description="Yahoo Finance symbol to verify.", examples=["LTC-USD", "^VIX"]),
+):
+    result = check_symbol(symbol)
+    result["already_tracked"] = asset_exists(symbol)
+    return result
+
+
+@router.post(
+    "/admin/assets",
+    summary="Add an asset to the tracked catalogue (admin)",
+    description=(
+        "Inserts a new symbol into the `assets` table. `name` and `asset_type` are optional: "
+        "if omitted they are inferred from Yahoo Finance (`asset_type` must then be one of "
+        "`fx`, `index`, `metal`, `stock`, `etf`, `crypto`). After adding, use "
+        "`POST /finance/admin/assets/{symbol}/backfill` to fetch its 5-year history."
+    ),
+    responses=_resp({
+        "symbol": "LTC-USD",
+        "name": "Litecoin",
+        "asset_type": "crypto",
+        "properties": {},
+    }, description="The stored asset row"),
+    dependencies=[Depends(require_admin)],
+)
+def add_tracked_asset(payload: AddAssetRequest):
+    if asset_exists(payload.symbol):
+        raise HTTPException(
+            status_code=409, detail=f"Symbol '{payload.symbol}' is already tracked."
+        )
+    name, asset_type = payload.name, payload.asset_type
+    if name is None or asset_type is None:
+        chk = check_symbol(payload.symbol)
+        if not chk["exists"]:
+            raise HTTPException(
+                status_code=422,
+                detail=chk["note"] or f"Symbol '{payload.symbol}' was not found on Yahoo Finance.",
+            )
+        name = name or chk["name"] or payload.symbol
+        asset_type = asset_type or chk["suggested_type"]
+        if asset_type is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not infer an asset category. Provide an explicit asset_type.",
+            )
+    try:
+        return add_asset(payload.symbol, name, asset_type, payload.properties)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post(
+    "/admin/assets/{symbol}/backfill",
+    summary="Backfill 5 years for a single tracked asset (admin, fast)",
+    description=(
+        "**Fast path:** downloads ~5 years of daily history for **one asset already present in the "
+        "`assets` table** in a single request (no inter-request throttling needed; still retries "
+        "with exponential backoff on rate limits). Upserts, so re-running just refreshes stored "
+        "rows.\n\n"
+        "For bulk/backfilling-many use the slow endpoint `POST /finance/admin/backfill-missing`."
+    ),
+    responses=_resp({
+        "status": "done",
+        "symbol": "LTC-USD",
+        "rows_written": 1250,
+        "latest": {"date": "2026-09-08", "open": 102.5, "high": 104.0,
+                   "low": 101.8, "close": 103.2, "volume": 50000},
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def backfill_tracked_asset(
+    symbol: str = Path(..., description="Symbol present in the assets table.", examples=["LTC-USD", "NVDA"]),
+    db: Session = Depends(get_db),
+):
+    if not asset_exists(symbol):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Symbol '{symbol}' is not in the assets table. Add it first via POST /finance/admin/assets.",
+        )
+    rows = backfill(symbol)
+    if rows > 0:
+        invalidate_cache()
+        refresh_cache()
     return {
         "status": "done" if rows > 0 else "no_data",
         "symbol": symbol,
@@ -556,11 +957,12 @@ def get_symbol_history(
 
 def _ingestion_summary(db: Session, results):
     summary = []
-    for asset in ALL_ASSETS:
+    for asset in get_tracked_assets(db):
         row = _latest(asset["symbol"], db)
         summary.append({
             "symbol":       asset["symbol"],
             "name":         asset["name"],
+            "asset_type":   asset["asset_type"],
             "rows_written": results.get(asset["symbol"]),
             "latest":       _row_to_dict(row),
         })
@@ -569,12 +971,15 @@ def _ingestion_summary(db: Session, results):
 
 @router.post(
     "/admin/backfill",
-    summary="Backfill 5 years of history (admin)",
+    summary="Backfill ALL assets (admin, medium speed)",
     description=(
-        "Triggers the full 5-year backfill for **all tracked assets** and stores the data in the "
-        "database. Protected by the `X-Admin-Key` header (send the value of the `ADMIN_KEY` "
-        "environment variable). Takes several minutes.\n\n"
-        "Returns the number of rows written per asset plus the latest stored value for each."
+        "Triggers the full 5-year backfill for **all tracked assets** (whether or not they "
+        "already have history) and stores the data in the database. Throttled with the normal "
+        "delay config (`BACKFILL_DELAY_SECONDS`, default ~2s between symbols). Protected by the "
+        "`X-Admin-Key` header (send the value of the `ADMIN_KEY` environment variable). Takes "
+        "several minutes.\n\n"
+        "Usually `POST /finance/admin/backfill-missing` (slow, skips covered assets) is the safer "
+        "choice. Returns the number of rows written per asset plus the latest stored value for each."
     ),
     responses=_resp({
         "status": "done",
@@ -588,9 +993,108 @@ def _ingestion_summary(db: Session, results):
     dependencies=[Depends(require_admin)],
 )
 def run_backfill(db: Session = Depends(get_db)):
+    invalidate_cache()
     results = backfill_all()
+    refresh_cache()
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "results": _ingestion_summary(db, results)}
+
+
+@router.post(
+    "/admin/backfill-missing",
+    summary="Backfill missing history (admin, slow & safe)",
+    description=(
+        "**Slow path, purpose-built to avoid Yahoo rate limits.** Downloads ~5 years of daily "
+        "history **only for tracked assets whose stored data does not span ~5 years** (newly "
+        "added assets, partially backfilled symbols, assets with only recent daily ingestion).\n\n"
+        "It spaces every symbol out with a generous delay (default ~12s + jitter between "
+        "symbols, configurable via `SLOW_BACKFILL_DELAY_SECONDS` / `SLOW_BACKFILL_JITTER_SECONDS`) "
+        "and uses a gentler exponential backoff on rate limits "
+        "(`SLOW_YF_RETRY_BASE_SECONDS`). Safe to re-run: covered assets are skipped.\n\n"
+        "For a single asset (one quick request) use `POST /finance/admin/assets/{symbol}/backfill` "
+        "instead. Protected by the `X-Admin-Key` header."
+    ),
+    responses=_resp({
+        "status": "done",
+        "fetched_at": "2026-09-08T12:00:00+00:00",
+        "results": [
+            {"symbol": "NVDA", "name": "NVIDIA", "asset_type": "stock", "rows_written": 1250,
+             "latest": {"date": "2026-09-08", "open": 220.0, "high": 225.0,
+                        "low": 218.0, "close": 223.67, "volume": 50000000}},
+        ],
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def run_backfill_missing(db: Session = Depends(get_db)):
+    invalidate_cache()
+    results = backfill_missing()
+    refresh_cache()
+    return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "results": _ingestion_summary(db, results)}
+
+
+@router.get(
+    "/cache/status",
+    summary="Cache status",
+    description=(
+        "Returns metadata about the in-memory cache — number of symbols, total rows "
+        "held in memory, and when it was last reloaded from the database."
+    ),
+)
+
+def get_cache_status():
+    return cache_stats()
+
+
+@router.get(
+    "/cache/all",
+    summary="All data from memory (fast)",
+    description=(
+        "Returns every stored daily bar for every asset straight from the in-memory "
+        "cache (no database hit). The cache is loaded at startup and refreshed after "
+        "each scheduled ingestion."
+    ),
+    responses=_resp({
+        "count": 31250,
+        "symbols": 24,
+        "data": [
+            {"symbol": "EURUSD=X", "history": [
+                {"date": "2021-09-09", "open": 1.1810, "high": 1.1840,
+                 "low": 1.1800, "close": 1.1825, "volume": 0},
+            ]},
+        ],
+    }),
+)
+def get_cache_all():
+    cache = get_all()
+    data = [{"symbol": sym, "history": history} for sym, history in cache.items()]
+    total = sum(len(h) for h in cache.values())
+    return {"count": total, "symbols": len(data), "data": data}
+
+
+@router.get(
+    "/cache/{symbol}",
+    summary="History for one symbol from memory (fast)",
+    description=(
+        "Returns the full cached history for a single symbol straight from memory. "
+        "Faster than the DB-backed endpoints — no database round-trip."
+    ),
+    responses=_resp({
+        "symbol": "GC=F",
+        "count": 1257,
+        "history": [
+            {"date": "2021-09-09", "open": 1790.0, "high": 1805.0, "low": 1785.5,
+             "close": 1794.2, "volume": 120000},
+        ],
+    }),
+)
+def get_cache_symbol(
+    symbol: str = Path(..., description="Exact Yahoo Finance symbol.", examples=["^VIX", "GC=F"]),
+):
+    history = get_symbol(symbol)
+    if history is None:
+        raise HTTPException(status_code=404, detail=f"No cached data for symbol '{symbol}'.")
+    return {"symbol": symbol, "count": len(history), "history": history}
 
 
 @router.get(
@@ -665,6 +1169,8 @@ def get_logs(db: Session = Depends(get_db)):
     dependencies=[Depends(require_admin)],
 )
 def run_daily_ingest(db: Session = Depends(get_db)):
+    invalidate_cache()
     results = ingest_daily_all()
+    refresh_cache()
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "results": _ingestion_summary(db, results)}
