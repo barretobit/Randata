@@ -1096,31 +1096,6 @@ def get_cache_all():
     return {"count": total, "symbols": len(data), "data": data}
 
 
-@router.get(
-    "/cache/{symbol}",
-    summary="History for one symbol from memory (fast)",
-    description=(
-        "Returns the full cached history for a single symbol straight from memory. "
-        "Faster than the DB-backed endpoints — no database round-trip."
-    ),
-    responses=_resp({
-        "symbol": "GC=F",
-        "count": 1257,
-        "history": [
-            {"date": "2021-09-09", "open": 1790.0, "high": 1805.0, "low": 1785.5,
-             "close": 1794.2, "volume": 120000},
-        ],
-    }),
-)
-def get_cache_symbol(
-    symbol: str = Path(..., description="Exact Yahoo Finance symbol.", examples=["^VIX", "GC=F"]),
-):
-    history = get_symbol(symbol)
-    if history is None:
-        raise HTTPException(status_code=404, detail=f"No cached data for symbol '{symbol}'.")
-    return {"symbol": symbol, "count": len(history), "history": history}
-
-
 def _cache_by_type(symbols: list) -> dict:
     cache = get_all()
     wanted = {s["symbol"] for s in symbols}
@@ -1173,6 +1148,31 @@ def get_cache_etfs():
 )
 def get_cache_cryptos():
     return _cache_by_type(CRYPTO)
+
+
+@router.get(
+    "/cache/{symbol}",
+    summary="History for one symbol from memory (fast)",
+    description=(
+        "Returns the full cached history for a single symbol straight from memory. "
+        "Faster than the DB-backed endpoints — no database round-trip."
+    ),
+    responses=_resp({
+        "symbol": "GC=F",
+        "count": 1257,
+        "history": [
+            {"date": "2021-09-09", "open": 1790.0, "high": 1805.0, "low": 1785.5,
+             "close": 1794.2, "volume": 120000},
+        ],
+    }),
+)
+def get_cache_symbol(
+    symbol: str = Path(..., description="Exact Yahoo Finance symbol.", examples=["^VIX", "GC=F"]),
+):
+    history = get_symbol(symbol)
+    if history is None:
+        raise HTTPException(status_code=404, detail=f"No cached data for symbol '{symbol}'.")
+    return {"symbol": symbol, "count": len(history), "history": history}
 
 
 @router.get(
