@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets
 from ..assets import ALL_ASSETS, CRYPTO, CRYPTO_MAP, ETFS, ETF_MAP, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, STOCKS, STOCK_MAP, SYMBOL_MAP
-from ..cache import get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
+from ..cache import details as cache_details, get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
 from ..config import ADMIN_KEY
 from ..db import engine, get_db
 from ..ingestion import backfill, backfill_all, backfill_missing, check_symbol, ingest_daily_all
@@ -883,6 +883,30 @@ def backfill_tracked_asset(
 
 
 @router.get(
+    "/admin/cache/details",
+    summary="Detailed cache report (admin)",
+    description=(
+        "Returns a full report of what is currently held in the in-memory cache: "
+        "per-symbol row counts, coverage (first/last date), total rows, and an "
+        "estimated memory footprint. Useful for confirming the cache is healthy "
+        "after a deploy or an ingestion run."
+    ),
+    responses=_resp({
+        "loaded_at": "2026-09-10T00:00:00+00:00",
+        "symbols": 116,
+        "total_rows": 153950,
+        "est_memory_mb": 66.1,
+        "per_symbol": [
+            {"symbol": "EURUSD=X", "rows": 1300, "first_date": "2021-09-09", "last_date": "2026-09-10"},
+        ],
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def get_cache_details():
+    return cache_details()
+
+
+@router.get(
     "/symbol/{symbol}",
     summary="Latest bar for any stored symbol",
     description=(
@@ -1095,6 +1119,60 @@ def get_cache_symbol(
     if history is None:
         raise HTTPException(status_code=404, detail=f"No cached data for symbol '{symbol}'.")
     return {"symbol": symbol, "count": len(history), "history": history}
+
+
+def _cache_by_type(symbols: list) -> dict:
+    cache = get_all()
+    wanted = {s["symbol"] for s in symbols}
+    filtered = {sym: hist for sym, hist in cache.items() if sym in wanted}
+    data = [{"symbol": sym, "history": hist} for sym, hist in filtered.items()]
+    total = sum(len(h) for h in filtered.values())
+    return {"count": total, "symbols": len(data), "data": data}
+
+
+@router.get(
+    "/cache/stocks",
+    summary="All stock histories from memory (fast)",
+    description="Returns the full cached 5-year history for every tracked stock straight from the in-memory cache.",
+)
+def get_cache_stocks():
+    return _cache_by_type(STOCKS)
+
+
+@router.get(
+    "/cache/indexes",
+    summary="All index histories from memory (fast)",
+    description="Returns the full cached 5-year history for every tracked index straight from the in-memory cache.",
+)
+def get_cache_indexes():
+    return _cache_by_type(INDEXES)
+
+
+@router.get(
+    "/cache/metals",
+    summary="All metal histories from memory (fast)",
+    description="Returns the full cached 5-year history for every tracked precious metal straight from the in-memory cache.",
+)
+def get_cache_metals():
+    return _cache_by_type(PRECIOUS_METALS)
+
+
+@router.get(
+    "/cache/etfs",
+    summary="All ETF histories from memory (fast)",
+    description="Returns the full cached 5-year history for every tracked ETF straight from the in-memory cache.",
+)
+def get_cache_etfs():
+    return _cache_by_type(ETFS)
+
+
+@router.get(
+    "/cache/cryptos",
+    summary="All crypto histories from memory (fast)",
+    description="Returns the full cached 5-year history for every tracked crypto asset straight from the in-memory cache.",
+)
+def get_cache_cryptos():
+    return _cache_by_type(CRYPTO)
 
 
 @router.get(

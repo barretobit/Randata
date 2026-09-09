@@ -104,3 +104,33 @@ def stats() -> dict:
             "total_rows": total_rows,
             "loaded_at":  _loaded_at.isoformat() if _loaded_at else None,
         }
+
+
+def details() -> dict:
+    """Return a detailed cache report: per-symbol coverage and memory estimate.
+
+    Estimated size is a rough memory footprint of the Python dict/list structure,
+    useful for monitoring whether the cache is healthy or unexpectedly large.
+    """
+    with _lock:
+        per_symbol = []
+        total_rows = 0
+        total_bytes = 0
+        for sym, history in sorted(_cache.items()):
+            rows = len(history)
+            total_rows += rows
+            per_symbol.append({
+                "symbol":     sym,
+                "rows":       rows,
+                "first_date": history[0]["date"] if rows else None,
+                "last_date":  history[-1]["date"] if rows else None,
+            })
+            # rough Python overhead: dict + strings + floats
+            total_bytes += rows * 450
+        return {
+            "loaded_at":  _loaded_at.isoformat() if _loaded_at else None,
+            "symbols":    len(per_symbol),
+            "total_rows": total_rows,
+            "est_memory_mb": round(total_bytes / (1024 * 1024), 2),
+            "per_symbol": per_symbol,
+        }
