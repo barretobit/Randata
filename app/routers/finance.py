@@ -593,6 +593,57 @@ def run_backfill(db: Session = Depends(get_db)):
             "results": _ingestion_summary(db, results)}
 
 
+@router.get(
+    "/logs",
+    summary="Recent ingestion logs (last 7 days)",
+    description=(
+        "Returns all structured log events from the `api_logs` table for the past 7 days, "
+        "sorted most-recent-first. Useful for diagnosing scheduler or fetch failures."
+    ),
+    responses=_resp({
+        "count": 2,
+        "logs": [
+            {
+                "id": 1,
+                "recorded_at": "2026-09-08T23:00:12",
+                "logger": "ingestion",
+                "level": "INFO",
+                "message": "Fetched ^GSPC (period=5d)",
+                "symbol": "^GSPC",
+                "duration_ms": 1234,
+                "rows_written": 5,
+                "success": True,
+                "exception": None,
+            },
+        ],
+    }),
+)
+def get_logs(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text(
+            "SELECT id, recorded_at, logger, level, message, symbol, "
+            "duration_ms, rows_written, success, exception "
+            "FROM api_logs WHERE recorded_at >= UTC_TIMESTAMP() - INTERVAL 7 DAY "
+            "ORDER BY recorded_at DESC"
+        )
+    ).fetchall()
+    logs = []
+    for r in rows:
+        logs.append({
+            "id":           r.id,
+            "recorded_at":  str(r.recorded_at),
+            "logger":       r.logger,
+            "level":        r.level,
+            "message":      r.message,
+            "symbol":       r.symbol,
+            "duration_ms":  r.duration_ms,
+            "rows_written": r.rows_written,
+            "success":      bool(r.success),
+            "exception":    r.exception,
+        })
+    return {"count": len(logs), "logs": logs}
+
+
 @router.post(
     "/admin/ingest-daily",
     summary="Run daily ingestion now (admin)",
