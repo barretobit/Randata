@@ -11,6 +11,7 @@ from .db import SessionLocal
 from .ingestion import ingest_daily_all
 from .logging_config import get_logger
 from .routers.finance import router as finance_router
+from .routers.storage import router as storage_router
 
 logger = get_logger("main")
 
@@ -23,7 +24,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -39,6 +40,7 @@ async def health():
     return {"status": "ok"}
 
 app.include_router(finance_router, prefix="/finance", tags=["Finance"])
+app.include_router(storage_router, prefix="/storage", tags=["Storage"])
 
 
 @app.on_event("startup")
