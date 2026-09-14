@@ -85,6 +85,38 @@ def create_entry(body: StorageCreateRequest, db: Session = Depends(get_db)):
 
 
 @router.get(
+    "/list",
+    summary="List all codes for a user",
+    description="Returns every code for the user whose stored password matches.",
+)
+def list_codes(
+    user: str = Query(..., description="Username"),
+    password: str = Query(..., description="Password"),
+    db: Session = Depends(get_db),
+):
+    sql = text(
+        "SELECT code, pass_hash, last_updated "
+        "FROM file_storage WHERE user = :user ORDER BY last_updated DESC"
+    )
+    rows = db.execute(sql, {"user": user}).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No files found for user.")
+
+    codes = []
+    for row in rows:
+        if _verify_password(password, row.pass_hash):
+            codes.append({
+                "code": row.code,
+                "last_updated": str(row.last_updated),
+            })
+
+    if not codes:
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+    return {"user": user, "count": len(codes), "codes": codes}
+
+
+@router.get(
     "/{code}",
     summary="Retrieve JSON data by code",
     description="Returns the stored JSON if the provided credentials match.",
