@@ -84,6 +84,23 @@ def create_entry(body: StorageCreateRequest, db: Session = Depends(get_db)):
     return {"status": "created", "code": body.code}
 
 
+@router.post(
+    "/auth",
+    summary="Authenticate a user",
+    description="Returns success if any stored password for the user matches.",
+)
+def authenticate(body: StorageAuthRequest, db: Session = Depends(get_db)):
+    sql = text("SELECT user, pass_hash FROM file_storage WHERE user = :user")
+    rows = db.execute(sql, {"user": body.user}).fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not any(_verify_password(body.password, row.pass_hash) for row in rows):
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+    return {"user": body.user, "authenticated": True}
+
+
 @router.get(
     "/list",
     summary="List all codes for a user",
