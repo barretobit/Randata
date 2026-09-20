@@ -39,13 +39,13 @@ def custom_openapi():
             "name": "X-Admin-Key",
         }
     }
-    for path in openapi_schema.get("paths", {}).values():
+    for path_name, path in openapi_schema.get("paths", {}).items():
+        if "/admin/" not in path_name:
+            continue
         for operation in path.values():
-            if isinstance(operation, dict) and "security" in operation:
-                continue
             if not isinstance(operation, dict):
                 continue
-            operation.setdefault("security", [{"X-Admin-Key": []}])
+            operation["security"] = [{"X-Admin-Key": []}]
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
