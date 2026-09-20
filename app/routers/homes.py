@@ -163,7 +163,7 @@ def _link_to_dict(row) -> dict:
                 "to store client-side (e.g. in browser storage) for subsequent Home calls.",
 )
 def login(body: AuthRequest, db: Session = Depends(get_db)):
-    sql = text("SELECT id, pass FROM users WHERE user = :user")
+    sql = text("SELECT id, pass, combined_income FROM users WHERE user = :user")
     row = db.execute(sql, {"user": body.user}).fetchone()
 
     if row is None:
@@ -171,7 +171,12 @@ def login(body: AuthRequest, db: Session = Depends(get_db)):
     if not _verify_password(row._mapping["pass"], body.pass_):
         raise HTTPException(status_code=401, detail="Invalid credentials.")
 
-    return {"user_id": row.id, "user": body.user, "authenticated": True}
+    return {
+        "user_id": row.id,
+        "user": body.user,
+        "combined_income": float(row.combined_income) if row.combined_income is not None else None,
+        "authenticated": True,
+    }
 
 
 @router.post(
