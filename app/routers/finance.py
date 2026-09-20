@@ -1,7 +1,8 @@
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ from ..db import engine, get_db
 from ..ingestion import backfill, backfill_all, backfill_missing, check_symbol, ingest_daily_all
 
 router = APIRouter()
+
+X_ADMIN_KEY_HEADER = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
 
 class AddAssetRequest(BaseModel):
@@ -60,8 +63,10 @@ def _row_to_dict(row):
     }
 
 
-def require_admin(request: Request):
-    if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
+def require_admin(request: Request, x_admin_key: str | None = Security(X_ADMIN_KEY_HEADER)):
+    if not ADMIN_KEY:
+        return
+    if x_admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key.")
 
 

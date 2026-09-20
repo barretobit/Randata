@@ -4,6 +4,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from .asset_repo import seed_assets
 from .cache import load as load_cache
@@ -20,6 +21,36 @@ app = FastAPI(
     description="Daily financial data (FX pairs, indexes, precious metals, stocks, ETFs, and crypto) sourced from Yahoo Finance and stored in MySQL.",
     version="1.0",
 )
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "X-Admin-Key": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Admin-Key",
+        }
+    }
+    for path in openapi_schema.get("paths", {}).values():
+        for operation in path.values():
+            if isinstance(operation, dict) and "security" in operation:
+                continue
+            if not isinstance(operation, dict):
+                continue
+            operation.setdefault("security", [{"X-Admin-Key": []}])
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 app.add_middleware(
     CORSMiddleware,
