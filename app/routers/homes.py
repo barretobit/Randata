@@ -1,7 +1,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -62,6 +62,23 @@ class VisitCreateRequest(BaseModel):
 class LinkCreateRequest(BaseModel):
     title: Optional[str] = None
     url: Optional[str] = None
+
+
+class AuthRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    user: str
+    pass_: str = Field(alias="pass")
+
+
+def _verify_password(stored: str, plain: str) -> bool:
+    if stored.startswith("$2"):
+        import bcrypt as _bcrypt
+        try:
+            return _bcrypt.checkpw(plain.encode(), stored.encode())
+        except ValueError:
+            return False
+    return stored == plain
 
 
 def _clean(value):
@@ -137,6 +154,24 @@ def _link_to_dict(row) -> dict:
         "title": row.title,
         "url": row.url,
     }
+
+
+@router.post(
+    "/auth/login",
+    summary="Authenticate a user",
+    description="Verifies username/password against the users table and returns the user_id "
+                "to store client-side (e.g. in browser storage) for subsequent Home calls.",
+)
+def login(body: AuthRequest, db: Session = Depends(get_db)):
+    sql = text("SELECT id, pass FROM users WHERE user = :user")
+    row = db.execute(sql, {"user": body.user}).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not _verify_password(row._mapping["pass"], body.pass_):
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+    return {"user_id": row.id, "user": body.user, "authenticated": True}
 
 
 @router.post(
