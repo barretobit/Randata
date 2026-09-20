@@ -906,6 +906,35 @@ def get_cache_details():
     return cache_details()
 
 
+@router.post(
+    "/admin/cache/refresh",
+    summary="Refresh the in-memory cache (admin)",
+    description=(
+        "Deletes the current in-memory cache and rebuilds it from the database using the "
+        "rolling five years of daily price history. This does not fetch data from Yahoo "
+        "Finance. Protected by the `X-Admin-Key` header."
+    ),
+    responses=_resp({
+        "status": "done",
+        "refreshed_at": "2026-09-10T00:00:00+00:00",
+        "symbols": 116,
+        "total_rows": 153950,
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def refresh_cache_from_database():
+    invalidate_cache()
+    if not refresh_cache():
+        raise HTTPException(status_code=503, detail="Cache refresh failed.")
+    stats = cache_stats()
+    return {
+        "status": "done",
+        "refreshed_at": stats["loaded_at"],
+        "symbols": stats["symbols"],
+        "total_rows": stats["total_rows"],
+    }
+
+
 @router.get(
     "/symbol/{symbol}",
     summary="Latest bar for any stored symbol",

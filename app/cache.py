@@ -1,11 +1,11 @@
 """In-memory cache for historical price data.
 
-Loads all daily_prices rows on startup and refreshes after each ingestion.
+Loads the last five years of daily_prices rows on startup and refreshes after each ingestion.
 Serves data without hitting the database on read-heavy public endpoints.
 """
 
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
@@ -17,6 +17,7 @@ logger = get_logger("cache")
 _lock = threading.Lock()
 _cache: dict[str, list[dict]] = {}
 _loaded_at: datetime | None = None
+_CACHE_HISTORY_DAYS = 365 * 5
 
 
 def _row_to_dict(row) -> dict:
@@ -30,20 +31,22 @@ def _row_to_dict(row) -> dict:
     }
 
 
-def load() -> None:
-    """Load all historical data from the database into memory."""
+def load() -> bool:
+    """Load the last five years of historical data from the database into memory."""
     global _loaded_at
     if SessionLocal is None:
         logger.warning("No database connection — cache not loaded.")
-        return
+        return False
     db = None
     try:
         db = SessionLocal()
         rows = db.execute(
             text(
                 "SELECT symbol, date, open, high, low, close, volume "
-                "FROM daily_prices ORDER BY symbol, date ASC"
-            )
+                "FROM daily_prices WHERE date >= :start_date "
+                "ORDER BY symbol, date ASC"
+            ),
+            {"start_date": date.today() - timedelta(days=_CACHE_HISTORY_DAYS)},
         ).fetchall()
         new_cache: dict[str, list[dict]] = {}
         for r in rows:
@@ -57,16 +60,18 @@ def load() -> None:
             "Cache loaded: %d symbols, %d rows, refreshed at %s",
             len(new_cache), total_rows, _loaded_at.isoformat(),
         )
+        return True
     except Exception as e:
         logger.error("Failed to load cache: %s", e)
+        return False
     finally:
         if db is not None:
             db.close()
 
 
-def refresh() -> None:
+def refresh() -> bool:
     """Alias for load(). Call after ingestion to update the cache."""
-    load()
+    return load()
 
 
 def invalidate() -> None:

@@ -133,6 +133,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing ~5y history (gentle pacing, no rate-limit risk) |
 | POST   | `/finance/admin/backfill`                 | **Medium** backfill of ALL assets (throttled ~2s between symbols)                          |
 | POST   | `/finance/admin/ingest-daily`             | Run the daily fetch now                                                                    |
+| POST   | `/finance/admin/cache/refresh`             | Clear and rebuild the cache from the last 5 years in the database                          |
 | GET    | `/finance/admin/cache/details`            | Detailed cache report (per-symbol coverage, rows, estimated memory)                        |
 | GET    | `/finance/logs`                           | Recent ingestion logs (last 7 days)                                                        |
 
@@ -150,10 +151,10 @@ The scheduler runs the daily fetch automatically on weekdays at:
 
 ## In-memory cache
 
-All stored `daily_prices` rows are loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages.
+The rolling last five years of `daily_prices` rows are loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages.
 
 - **Memory footprint:** ~116 assets × ~1,300 bars ≈ 150k rows ≈ **~70 MB** (grows ~52 KB/day from the daily fetch — negligible).
-- **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data, so stale data is never served during a fetch cycle.
+- **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data or `POST /finance/admin/cache/refresh` is called. Cache loads include the rolling last five years from the database, so stale data is never served during a refresh cycle.
 - **Monitoring:** `GET /finance/cache/status` (public) gives quick stats; `GET /finance/admin/cache/details` (admin) gives per-symbol coverage and an estimated memory footprint — handy to confirm the cache rebuilt correctly after a deploy.
 
 > Note: the cache is in-process, so every deploy starts fresh and rebuilds from the database in a few seconds.
