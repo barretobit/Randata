@@ -79,6 +79,7 @@ STOCKS = [
     {"symbol": "WFC",   "name": "Wells Fargo"},
     {"symbol": "RTX",   "name": "RTX"},
     {"symbol": "SNDK",  "name": "Sandisk"},
+    {"symbol": "TSM",   "name": "Taiwan Semiconductor Manufacturing Company Limited"},
     {"symbol": "GEV",   "name": "GE Vernova"},
     {"symbol": "ANET",  "name": "Arista Networks"},
     {"symbol": "KLAC",  "name": "KLA"},

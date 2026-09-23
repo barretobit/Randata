@@ -8,6 +8,7 @@ from fastapi.openapi.utils import get_openapi
 
 from .asset_repo import seed_assets
 from .cache import load as load_cache
+from .catalog import load as load_catalog, refresh as refresh_catalog
 from .db import SessionLocal
 from .ingestion import ingest_daily_all
 from .logging_config import get_logger
@@ -83,11 +84,13 @@ def startup() -> None:
             seed_assets()
         except Exception as e:
             logger.error("Could not seed the assets table: %s", e)
+    load_catalog()
     load_cache()
 
 
 def _scheduled_ingest():
     ingest_daily_all()
+    refresh_catalog()
     load_cache()
     logger.info("Cache refreshed after scheduled ingestion.")
 

@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .. import catalog
 from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets
-from ..assets import ALL_ASSETS, CRYPTO, CRYPTO_MAP, ETFS, ETF_MAP, FX_PAIRS, INDEXES, METAL_MAP, PRECIOUS_METALS, STOCKS, STOCK_MAP, SYMBOL_MAP
 from ..cache import details as cache_details, get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
 from ..config import ADMIN_KEY
 from ..db import engine, get_db
@@ -80,11 +80,11 @@ def require_admin(request: Request):
 )
 def get_all_fx_rates(db: Session = Depends(get_db)):
     result = []
-    for pair in FX_PAIRS:
+    for pair in catalog.get_group("fx"):
         row = _latest(pair["symbol"], db)
         result.append({
             "symbol":  pair["symbol"],
-            "display": pair["display"],
+            "display": pair.get("display", pair["symbol"]),
             "name":    pair["name"],
             "latest":  _row_to_dict(row),
         })
@@ -111,13 +111,13 @@ def get_fx_rate(
     db: Session = Depends(get_db),
 ):
     symbol = f"{pair.upper()}=X"
-    if symbol not in SYMBOL_MAP:
+    meta = catalog.get_symbol_map().get(symbol)
+    if meta is None:
         raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
     row = _latest(symbol, db)
-    meta = SYMBOL_MAP[symbol]
     return {
         "symbol":  symbol,
-        "display": meta["display"],
+        "display": meta.get("display", symbol),
         "name":    meta["name"],
         "latest":  _row_to_dict(row),
     }
@@ -146,13 +146,13 @@ def get_fx_history(
     db: Session = Depends(get_db),
 ):
     symbol = f"{pair.upper()}=X"
-    if symbol not in SYMBOL_MAP:
+    meta = catalog.get_symbol_map().get(symbol)
+    if meta is None:
         raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
     rows = _history(symbol, db)
-    meta = SYMBOL_MAP[symbol]
     return {
         "symbol":  symbol,
-        "display": meta["display"],
+        "display": meta.get("display", symbol),
         "name":    meta["name"],
         "count":   len(rows),
         "history": [_row_to_dict(r) for r in rows],
@@ -174,12 +174,12 @@ def get_fx_history(
 )
 def get_all_indexes(db: Session = Depends(get_db)):
     result = []
-    for idx in INDEXES:
+    for idx in catalog.get_group("index"):
         row = _latest(idx["symbol"], db)
         result.append({
             "symbol": idx["symbol"],
             "name":   idx["name"],
-            "region": idx["region"],
+            "region": idx.get("region"),
             "latest": _row_to_dict(row),
         })
     return result
@@ -205,14 +205,14 @@ def get_index(
     db: Session = Depends(get_db),
 ):
     full_symbol = f"^{symbol.upper()}"
-    if full_symbol not in SYMBOL_MAP:
+    meta = catalog.get_symbol_map().get(full_symbol)
+    if meta is None:
         raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
     row = _latest(full_symbol, db)
-    meta = SYMBOL_MAP[full_symbol]
     return {
         "symbol": full_symbol,
         "name":   meta["name"],
-        "region": meta["region"],
+        "region": meta.get("region"),
         "latest": _row_to_dict(row),
     }
 
@@ -240,14 +240,14 @@ def get_index_history(
     db: Session = Depends(get_db),
 ):
     full_symbol = f"^{symbol.upper()}"
-    if full_symbol not in SYMBOL_MAP:
+    meta = catalog.get_symbol_map().get(full_symbol)
+    if meta is None:
         raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
     rows = _history(full_symbol, db)
-    meta = SYMBOL_MAP[full_symbol]
     return {
         "symbol":  full_symbol,
         "name":    meta["name"],
-        "region":  meta["region"],
+        "region":  meta.get("region"),
         "count":   len(rows),
         "history": [_row_to_dict(r) for r in rows],
     }
@@ -268,13 +268,13 @@ def get_index_history(
 )
 def get_all_metals(db: Session = Depends(get_db)):
     result = []
-    for metal in PRECIOUS_METALS:
+    for metal in catalog.get_group("metal"):
         row = _latest(metal["symbol"], db)
         result.append({
             "symbol":  metal["symbol"],
-            "display": metal["display"],
+            "display": metal.get("display", metal["symbol"]),
             "name":    metal["name"],
-            "unit":    metal["unit"],
+            "unit":    metal.get("unit"),
             "latest":  _row_to_dict(row),
         })
     return result
@@ -300,15 +300,15 @@ def get_metal(
     metal: str = Path(..., description="Metal name: gold, silver, platinum or palladium.", examples=["gold", "silver"]),
     db: Session = Depends(get_db),
 ):
-    asset = METAL_MAP.get(metal.lower())
+    asset = catalog.get_map("metal").get(metal.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Precious metal '{metal}' not tracked.")
     row = _latest(asset["symbol"], db)
     return {
         "symbol":  asset["symbol"],
-        "display": asset["display"],
+        "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
-        "unit":    asset["unit"],
+        "unit":    asset.get("unit"),
         "latest":  _row_to_dict(row),
     }
 
@@ -336,15 +336,15 @@ def get_metal_history(
     metal: str = Path(..., description="Metal name: gold, silver, platinum or palladium.", examples=["platinum", "palladium"]),
     db: Session = Depends(get_db),
 ):
-    asset = METAL_MAP.get(metal.lower())
+    asset = catalog.get_map("metal").get(metal.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Precious metal '{metal}' not tracked.")
     rows = _history(asset["symbol"], db)
     return {
         "symbol":  asset["symbol"],
-        "display": asset["display"],
+        "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
-        "unit":    asset["unit"],
+        "unit":    asset.get("unit"),
         "count":   len(rows),
         "history": [_row_to_dict(r) for r in rows],
     }
@@ -365,7 +365,7 @@ def get_metal_history(
 )
 def get_all_stocks(db: Session = Depends(get_db)):
     result = []
-    for stock in STOCKS:
+    for stock in catalog.get_group("stock"):
         row = _latest(stock["symbol"], db)
         result.append({
             "symbol": stock["symbol"],
@@ -390,7 +390,7 @@ def get_stock(
     symbol: str = Path(..., description="Stock ticker symbol.", examples=["NVDA", "AAPL"]),
     db: Session = Depends(get_db),
 ):
-    asset = STOCK_MAP.get(symbol.lower())
+    asset = catalog.get_map("stock").get(symbol.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Stock '{symbol}' not tracked.")
     row = _latest(asset["symbol"], db)
@@ -419,7 +419,7 @@ def get_stock_history(
     symbol: str = Path(..., description="Stock ticker symbol.", examples=["NVDA", "AAPL"]),
     db: Session = Depends(get_db),
 ):
-    asset = STOCK_MAP.get(symbol.lower())
+    asset = catalog.get_map("stock").get(symbol.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Stock '{symbol}' not tracked.")
     rows = _history(asset["symbol"], db)
@@ -446,7 +446,7 @@ def get_stock_history(
 )
 def get_all_etfs(db: Session = Depends(get_db)):
     result = []
-    for etf in ETFS:
+    for etf in catalog.get_group("etf"):
         row = _latest(etf["symbol"], db)
         result.append({
             "symbol": etf["symbol"],
@@ -471,7 +471,7 @@ def get_etf(
     symbol: str = Path(..., description="ETF ticker symbol.", examples=["VOO", "QQQ"]),
     db: Session = Depends(get_db),
 ):
-    asset = ETF_MAP.get(symbol.lower())
+    asset = catalog.get_map("etf").get(symbol.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"ETF '{symbol}' not tracked.")
     row = _latest(asset["symbol"], db)
@@ -500,7 +500,7 @@ def get_etf_history(
     symbol: str = Path(..., description="ETF ticker symbol.", examples=["VOO", "QQQ"]),
     db: Session = Depends(get_db),
 ):
-    asset = ETF_MAP.get(symbol.lower())
+    asset = catalog.get_map("etf").get(symbol.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"ETF '{symbol}' not tracked.")
     rows = _history(asset["symbol"], db)
@@ -527,11 +527,11 @@ def get_etf_history(
 )
 def get_all_crypto(db: Session = Depends(get_db)):
     result = []
-    for coin in CRYPTO:
+    for coin in catalog.get_group("crypto"):
         row = _latest(coin["symbol"], db)
         result.append({
             "symbol":  coin["symbol"],
-            "display": coin["display"],
+            "display": coin.get("display", coin["symbol"]),
             "name":    coin["name"],
             "latest":  _row_to_dict(row),
         })
@@ -554,13 +554,13 @@ def get_crypto(
     symbol: str = Path(..., description="Crypto ticker symbol.", examples=["BTC-USD", "ETH-USD"]),
     db: Session = Depends(get_db),
 ):
-    asset = CRYPTO_MAP.get(symbol.lower())
+    asset = catalog.get_map("crypto").get(symbol.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Cryptocurrency '{symbol}' not tracked.")
     row = _latest(asset["symbol"], db)
     return {
         "symbol":  asset["symbol"],
-        "display": asset["display"],
+        "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
         "latest":  _row_to_dict(row),
     }
@@ -585,13 +585,13 @@ def get_crypto_history(
     symbol: str = Path(..., description="Crypto ticker symbol.", examples=["BTC-USD", "ETH-USD"]),
     db: Session = Depends(get_db),
 ):
-    asset = CRYPTO_MAP.get(symbol.lower())
+    asset = catalog.get_map("crypto").get(symbol.lower())
     if asset is None:
         raise HTTPException(status_code=404, detail=f"Cryptocurrency '{symbol}' not tracked.")
     rows = _history(asset["symbol"], db)
     return {
         "symbol":  asset["symbol"],
-        "display": asset["display"],
+        "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
         "count":   len(rows),
         "history": [_row_to_dict(r) for r in rows],
@@ -706,14 +706,7 @@ def get_last_updated(db: Session = Depends(get_db)):
     }),
 )
 def list_assets():
-    return {
-        "fx_pairs":        FX_PAIRS,
-        "indexes":         INDEXES,
-        "precious_metals": PRECIOUS_METALS,
-        "stocks":          STOCKS,
-        "etfs":            ETFS,
-        "crypto":          CRYPTO,
-    }
+    return catalog.get_catalog()
 
 
 @router.get(
@@ -745,6 +738,7 @@ def run_backfill_symbol(
     if rows > 0:
         invalidate_cache()
         refresh_cache()
+        catalog.refresh()
     return {
         "status": "done" if rows > 0 else "no_data",
         "symbol": symbol,
@@ -837,7 +831,9 @@ def add_tracked_asset(payload: AddAssetRequest):
                 detail="Could not infer an asset category. Provide an explicit asset_type.",
             )
     try:
-        return add_asset(payload.symbol, name, asset_type, payload.properties)
+        asset = add_asset(payload.symbol, name, asset_type, payload.properties)
+        catalog.refresh()
+        return asset
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -874,6 +870,7 @@ def backfill_tracked_asset(
     if rows > 0:
         invalidate_cache()
         refresh_cache()
+        catalog.refresh()
     return {
         "status": "done" if rows > 0 else "no_data",
         "symbol": symbol,
@@ -923,6 +920,7 @@ def get_cache_details():
     dependencies=[Depends(require_admin)],
 )
 def refresh_cache_from_database():
+    catalog.refresh()
     invalidate_cache()
     if not refresh_cache():
         raise HTTPException(status_code=503, detail="Cache refresh failed.")
@@ -957,7 +955,7 @@ def get_symbol(
     if row is None:
         raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
     result = {"symbol": symbol, "latest": _row_to_dict(row)}
-    meta = SYMBOL_MAP.get(symbol)
+    meta = catalog.get_symbol_map().get(symbol)
     if meta:
         result["name"] = meta.get("name")
         if "display" in meta:
@@ -996,7 +994,7 @@ def get_symbol_history(
     if not rows:
         raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
     result = {"symbol": symbol, "count": len(rows), "history": [_row_to_dict(r) for r in rows]}
-    meta = SYMBOL_MAP.get(symbol)
+    meta = catalog.get_symbol_map().get(symbol)
     if meta:
         result["name"] = meta.get("name")
         if "display" in meta:
@@ -1046,6 +1044,7 @@ def _ingestion_summary(db: Session, results):
     dependencies=[Depends(require_admin)],
 )
 def run_backfill(db: Session = Depends(get_db)):
+    catalog.refresh()
     invalidate_cache()
     results = backfill_all()
     refresh_cache()
@@ -1079,6 +1078,7 @@ def run_backfill(db: Session = Depends(get_db)):
     dependencies=[Depends(require_admin)],
 )
 def run_backfill_missing(db: Session = Depends(get_db)):
+    catalog.refresh()
     invalidate_cache()
     results = backfill_missing()
     refresh_cache()
@@ -1140,7 +1140,7 @@ def _cache_by_type(symbols: list) -> dict:
     description="Returns the full cached 5-year history for every tracked stock straight from the in-memory cache.",
 )
 def get_cache_stocks():
-    return _cache_by_type(STOCKS)
+    return _cache_by_type(catalog.get_group("stock"))
 
 
 @router.get(
@@ -1149,7 +1149,7 @@ def get_cache_stocks():
     description="Returns the full cached 5-year history for every tracked index straight from the in-memory cache.",
 )
 def get_cache_indexes():
-    return _cache_by_type(INDEXES)
+    return _cache_by_type(catalog.get_group("index"))
 
 
 @router.get(
@@ -1158,7 +1158,7 @@ def get_cache_indexes():
     description="Returns the full cached 5-year history for every tracked precious metal straight from the in-memory cache.",
 )
 def get_cache_metals():
-    return _cache_by_type(PRECIOUS_METALS)
+    return _cache_by_type(catalog.get_group("metal"))
 
 
 @router.get(
@@ -1167,7 +1167,7 @@ def get_cache_metals():
     description="Returns the full cached 5-year history for every tracked ETF straight from the in-memory cache.",
 )
 def get_cache_etfs():
-    return _cache_by_type(ETFS)
+    return _cache_by_type(catalog.get_group("etf"))
 
 
 @router.get(
@@ -1176,7 +1176,7 @@ def get_cache_etfs():
     description="Returns the full cached 5-year history for every tracked crypto asset straight from the in-memory cache.",
 )
 def get_cache_cryptos():
-    return _cache_by_type(CRYPTO)
+    return _cache_by_type(catalog.get_group("crypto"))
 
 
 @router.get(
@@ -1276,6 +1276,7 @@ def get_logs(db: Session = Depends(get_db)):
     dependencies=[Depends(require_admin)],
 )
 def run_daily_ingest(db: Session = Depends(get_db)):
+    catalog.refresh()
     invalidate_cache()
     results = ingest_daily_all()
     refresh_cache()
