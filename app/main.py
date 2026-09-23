@@ -21,7 +21,7 @@ logger = get_logger("main")
 app = FastAPI(
     title="Randata Finance API",
     description="Daily financial data (FX pairs, indexes, precious metals, stocks, ETFs, and crypto) sourced from Yahoo Finance and stored in MySQL.",
-    version="1.0",
+    version="1.2",
 )
 
 
@@ -70,7 +70,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": app.version}
 
 app.include_router(finance_router, prefix="/finance", tags=["Finance"])
 app.include_router(storage_router, prefix="/storage", tags=["Storage"])
