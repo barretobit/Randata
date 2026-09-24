@@ -82,7 +82,7 @@ Assets are registered in the `assets` table in the database — the single sourc
 - Solana — `SOL-USD`
 </details>
 
-The list above is the catalogue available today. More assets (stocks, ETFs, FX pairs, indexes, metals, crypto) can be added on demand via `POST /finance/admin/assets` — the endpoint validates the symbol against Yahoo Finance live, so the catalogue is not fixed to this list.
+The list above is the catalogue available today. More assets (stocks, ETFs, FX pairs, indexes, metals, crypto) can be added on demand via `POST /finance/admin/assets` — the endpoint validates the symbol against Yahoo Finance live, so the catalogue is not fixed to this list. For fully automated onboarding, `POST /finance/admin/assets/onboard` verifies the symbol, adds the asset, backfills exactly 5 years of history, and refreshes the cache in a single call.
 
 ## Public endpoints
 
@@ -128,6 +128,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/admin/assets`                   | List tracked assets from the `assets` table                                                |
 | GET    | `/finance/admin/assets/check?symbol=`     | Verify a symbol exists on Yahoo Finance (combines `yf.Ticker` + `yf.download`)             |
 | POST   | `/finance/admin/assets`                   | Add an asset to the tracked catalogue (name/type auto-inferred from Yahoo)                 |
+| POST   | `/finance/admin/assets/onboard`           | One-call onboarding: verify symbol → add asset → 5y backfill → refresh cache (~1 min)      |
 | POST   | `/finance/admin/assets/{symbol}/backfill` | **Fast** 5-year backfill for one tracked asset                                             |
 | GET    | `/finance/admin/backfill-symbol`          | **Fast** 5-year backfill for one arbitrary Yahoo symbol                                    |
 | POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing ~5y history (gentle pacing, no rate-limit risk) |

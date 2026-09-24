@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .. import catalog
 from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets
 from ..cache import details as cache_details, get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
-from ..config import ADMIN_KEY
+from ..config import ADMIN_KEY, SLOW_YF_RETRY_BASE_SECONDS
 from ..db import engine, get_db
 from ..ingestion import backfill, backfill_all, backfill_missing, check_symbol, ingest_daily_all
 
@@ -26,6 +26,12 @@ class AddAssetRequest(BaseModel):
     name: Optional[str] = None
     asset_type: Optional[str] = None
     properties: Optional[dict] = None
+
+
+class OnboardAssetRequest(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    asset_type: Optional[str] = None
 
 
 def _resp(example, description="Successful response"):
@@ -901,6 +907,79 @@ def add_tracked_asset(payload: AddAssetRequest):
         return asset
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post(
+    "/admin/assets/onboard",
+    summary="Onboard a new asset from just its symbol (admin)",
+    description=(
+        "One-call onboarding. Given only a Yahoo Finance symbol this endpoint:\n\n"
+        "1. Verifies the symbol and pulls its metadata (name + suggested asset type) from Yahoo Finance.\n"
+        "2. Inserts the asset into the `assets` catalogue, so it appears in every public endpoint.\n"
+        "3. Backfills ~5 years of daily history (gentle exponential backoff on rate limits).\n"
+        "4. Rebuilds the in-memory catalogue and price cache so the new asset is served everywhere.\n\n"
+        "Takes roughly a minute — the 5-year download dominates the runtime.\n\n"
+        "Errors: `409` if the symbol is already tracked, `422` if Yahoo cannot identify it or an "
+        "asset type cannot be inferred (`name`/`asset_type` can be provided as overrides), `502` if "
+        "the asset was added but the backfill failed (safe to retry via "
+        "`POST /finance/admin/assets/{symbol}/backfill`).\n\n"
+        "Protected by the `X-Admin-Key` header."
+    ),
+    responses=_resp({
+        "status": "done",
+        "asset": {"symbol": "LTC-USD", "name": "Litecoin", "asset_type": "crypto", "properties": {}},
+        "rows_written": 1250,
+        "latest": {"date": "2026-09-08", "open": 102.5, "high": 104.0,
+                   "low": 101.8, "close": 103.2, "volume": 50000},
+    }, description="The onboarded asset row, backfill row count and latest daily bar"),
+    dependencies=[Depends(require_admin)],
+)
+def onboard_asset(payload: OnboardAssetRequest, db: Session = Depends(get_db)):
+    symbol = payload.symbol
+    if asset_exists(symbol):
+        raise HTTPException(status_code=409, detail=f"Symbol '{symbol}' is already tracked.")
+
+    chk = check_symbol(symbol)
+    if not chk["exists"]:
+        raise HTTPException(
+            status_code=422,
+            detail=chk["note"] or f"Symbol '{symbol}' was not found on Yahoo Finance.",
+        )
+
+    name = payload.name or chk["name"] or symbol
+    asset_type = payload.asset_type or chk["suggested_type"]
+    if asset_type is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not infer an asset category for '{symbol}'. Provide an explicit asset_type.",
+        )
+
+    try:
+        asset = add_asset(symbol, name, asset_type)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    try:
+        rows = backfill(symbol, retry_base=SLOW_YF_RETRY_BASE_SECONDS)
+    except Exception as e:
+        catalog.refresh()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Asset '{symbol}' was added, but the 5-year backfill failed: {e}. "
+                   f"Retry via POST /finance/admin/assets/{symbol}/backfill.",
+        )
+
+    catalog.refresh()
+    if rows > 0:
+        invalidate_cache()
+        refresh_cache()
+
+    return {
+        "status": "done",
+        "asset": asset,
+        "rows_written": rows,
+        "latest": _row_to_dict(_latest(symbol, db)),
+    }
 
 
 @router.post(
