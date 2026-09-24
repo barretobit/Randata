@@ -5,27 +5,12 @@ import json
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from .assets import CRYPTO, ETFS, FX_PAIRS, INDEXES, PRECIOUS_METALS, STOCKS
 from .db import SessionLocal
 from .logging_config import get_logger
 
 logger = get_logger("asset_repo")
 
 VALID_TYPES = ("fx", "index", "metal", "stock", "etf", "crypto")
-
-# (asset_type, list) seed groups from the static catalogue in app/assets.py.
-_ASSET_GROUPS = [
-    ("fx",    FX_PAIRS),
-    ("index", INDEXES),
-    ("metal", PRECIOUS_METALS),
-    ("stock", STOCKS),
-    ("etf",   ETFS),
-    ("crypto", CRYPTO),
-]
-
-
-def _properties_of(item):
-    return {k: v for k, v in item.items() if k not in ("symbol", "name")}
 
 
 def _row_to_asset(row):
@@ -43,36 +28,6 @@ def _row_to_asset(row):
 def _close(db, own):
     if own and db is not None:
         db.close()
-
-
-def seed_assets(db=None):
-    """Idempotently insert the static catalogue from app/assets.py into the DB."""
-    own = db is None
-    if own:
-        db = SessionLocal()
-    added = 0
-    try:
-        for asset_type, group in _ASSET_GROUPS:
-            for item in group:
-                result = db.execute(
-                    text(
-                        "INSERT IGNORE INTO assets (symbol, name, asset_type, properties) "
-                        "VALUES (:symbol, :name, :asset_type, :properties)"
-                    ),
-                    {
-                        "symbol": item["symbol"],
-                        "name":   item["name"],
-                        "asset_type": asset_type,
-                        "properties": json.dumps(_properties_of(item)),
-                    },
-                )
-                added += result.rowcount or 0
-        db.commit()
-    finally:
-        _close(db, own)
-    if added:
-        logger.info("Seeded %d new rows into the assets table.", added)
-    return added
 
 
 def get_all_assets(db=None):

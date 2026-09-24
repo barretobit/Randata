@@ -1,7 +1,8 @@
 -- Randata Finance API -- tracked assets catalogue
 --
--- Stores one row per tracked instrument/symbol, formalising the categories
--- that previously lived only as hardcoded lists in app/assets.py.
+-- Stores one row per tracked instrument/symbol. This table is the single
+-- source of truth for the public catalogue — assets are added via the admin
+-- API (POST /finance/admin/assets).
 --
 -- asset_type values: 'fx' | 'index' | 'metal' | 'stock' | 'crypto'
 -- properties:       JSON object with category-specific metadata, e.g.

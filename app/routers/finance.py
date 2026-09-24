@@ -1,7 +1,12 @@
+import gzip
+import json
+import threading
 from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -35,6 +40,24 @@ def _latest(symbol: str, db: Session):
     return db.execute(sql, {"symbol": symbol}).fetchone()
 
 
+def _latest_many(symbols: list, db: Session) -> dict:
+    if not symbols:
+        return {}
+    placeholders = ", ".join(f":s{i}" for i in range(len(symbols)))
+    params = {f"s{i}": s for i, s in enumerate(symbols)}
+    rows = db.execute(
+        text(
+            "SELECT p.symbol, p.date, p.open, p.high, p.low, p.close, p.volume "
+            "FROM daily_prices p "
+            "JOIN (SELECT symbol, MAX(date) AS max_date FROM daily_prices "
+            f"WHERE symbol IN ({placeholders}) GROUP BY symbol) m "
+            "ON p.symbol = m.symbol AND p.date = m.max_date"
+        ),
+        params,
+    ).fetchall()
+    return {r.symbol: r for r in rows}
+
+
 def _history(symbol: str, db: Session, limit: int = None):
     sql = (
         "SELECT date, open, high, low, close, volume "
@@ -60,6 +83,36 @@ def _row_to_dict(row):
     }
 
 
+_GZIP_RESP_CACHE: dict = {}
+_GZIP_RESP_LOCK = threading.Lock()
+_GZIP_RESP_MAX_ITEMS = 16
+_GZIP_RESP_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _gzip_big_response(request: Request, key: str, freshness, producer) -> Response:
+    if "gzip" not in request.headers.get("accept-encoding", "").lower():
+        return Response(
+            content=json.dumps(jsonable_encoder(producer()), separators=(",", ":")).encode("utf-8"),
+            media_type="application/json",
+        )
+    cache_key = (key, freshness)
+    with _GZIP_RESP_LOCK:
+        payload = _GZIP_RESP_CACHE.get(cache_key)
+    if payload is None:
+        body = json.dumps(jsonable_encoder(producer()), separators=(",", ":")).encode("utf-8")
+        payload = gzip.compress(body, compresslevel=5)
+        if len(payload) <= _GZIP_RESP_MAX_BYTES:
+            with _GZIP_RESP_LOCK:
+                if len(_GZIP_RESP_CACHE) >= _GZIP_RESP_MAX_ITEMS:
+                    _GZIP_RESP_CACHE.clear()
+                _GZIP_RESP_CACHE[cache_key] = payload
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+    )
+
+
 def require_admin(request: Request):
     if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key.")
@@ -79,14 +132,15 @@ def require_admin(request: Request):
     ]),
 )
 def get_all_fx_rates(db: Session = Depends(get_db)):
+    pairs = catalog.get_group("fx")
+    latest = _latest_many([p["symbol"] for p in pairs], db)
     result = []
-    for pair in catalog.get_group("fx"):
-        row = _latest(pair["symbol"], db)
+    for pair in pairs:
         result.append({
             "symbol":  pair["symbol"],
             "display": pair.get("display", pair["symbol"]),
             "name":    pair["name"],
-            "latest":  _row_to_dict(row),
+            "latest":  _row_to_dict(latest.get(pair["symbol"])),
         })
     return result
 
@@ -111,7 +165,7 @@ def get_fx_rate(
     db: Session = Depends(get_db),
 ):
     symbol = f"{pair.upper()}=X"
-    meta = catalog.get_symbol_map().get(symbol)
+    meta = catalog.get_symbol(symbol)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
     row = _latest(symbol, db)
@@ -146,7 +200,7 @@ def get_fx_history(
     db: Session = Depends(get_db),
 ):
     symbol = f"{pair.upper()}=X"
-    meta = catalog.get_symbol_map().get(symbol)
+    meta = catalog.get_symbol(symbol)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"FX pair '{pair}' not tracked.")
     rows = _history(symbol, db)
@@ -173,14 +227,15 @@ def get_fx_history(
     ]),
 )
 def get_all_indexes(db: Session = Depends(get_db)):
+    indexes = catalog.get_group("index")
+    latest = _latest_many([i["symbol"] for i in indexes], db)
     result = []
-    for idx in catalog.get_group("index"):
-        row = _latest(idx["symbol"], db)
+    for idx in indexes:
         result.append({
             "symbol": idx["symbol"],
             "name":   idx["name"],
             "region": idx.get("region"),
-            "latest": _row_to_dict(row),
+            "latest": _row_to_dict(latest.get(idx["symbol"])),
         })
     return result
 
@@ -205,7 +260,7 @@ def get_index(
     db: Session = Depends(get_db),
 ):
     full_symbol = f"^{symbol.upper()}"
-    meta = catalog.get_symbol_map().get(full_symbol)
+    meta = catalog.get_symbol(full_symbol)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
     row = _latest(full_symbol, db)
@@ -240,7 +295,7 @@ def get_index_history(
     db: Session = Depends(get_db),
 ):
     full_symbol = f"^{symbol.upper()}"
-    meta = catalog.get_symbol_map().get(full_symbol)
+    meta = catalog.get_symbol(full_symbol)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"Index '{symbol}' not tracked.")
     rows = _history(full_symbol, db)
@@ -267,15 +322,16 @@ def get_index_history(
     ]),
 )
 def get_all_metals(db: Session = Depends(get_db)):
+    metals = catalog.get_group("metal")
+    latest = _latest_many([m["symbol"] for m in metals], db)
     result = []
-    for metal in catalog.get_group("metal"):
-        row = _latest(metal["symbol"], db)
+    for metal in metals:
         result.append({
             "symbol":  metal["symbol"],
             "display": metal.get("display", metal["symbol"]),
             "name":    metal["name"],
             "unit":    metal.get("unit"),
-            "latest":  _row_to_dict(row),
+            "latest":  _row_to_dict(latest.get(metal["symbol"])),
         })
     return result
 
@@ -364,13 +420,14 @@ def get_metal_history(
     ]),
 )
 def get_all_stocks(db: Session = Depends(get_db)):
+    stocks = catalog.get_group("stock")
+    latest = _latest_many([s["symbol"] for s in stocks], db)
     result = []
-    for stock in catalog.get_group("stock"):
-        row = _latest(stock["symbol"], db)
+    for stock in stocks:
         result.append({
             "symbol": stock["symbol"],
             "name":   stock["name"],
-            "latest": _row_to_dict(row),
+            "latest": _row_to_dict(latest.get(stock["symbol"])),
         })
     return result
 
@@ -445,13 +502,14 @@ def get_stock_history(
     ]),
 )
 def get_all_etfs(db: Session = Depends(get_db)):
+    etfs = catalog.get_group("etf")
+    latest = _latest_many([e["symbol"] for e in etfs], db)
     result = []
-    for etf in catalog.get_group("etf"):
-        row = _latest(etf["symbol"], db)
+    for etf in etfs:
         result.append({
             "symbol": etf["symbol"],
             "name":   etf["name"],
-            "latest": _row_to_dict(row),
+            "latest": _row_to_dict(latest.get(etf["symbol"])),
         })
     return result
 
@@ -526,14 +584,15 @@ def get_etf_history(
     ]),
 )
 def get_all_crypto(db: Session = Depends(get_db)):
+    coins = catalog.get_group("crypto")
+    latest = _latest_many([c["symbol"] for c in coins], db)
     result = []
-    for coin in catalog.get_group("crypto"):
-        row = _latest(coin["symbol"], db)
+    for coin in coins:
         result.append({
             "symbol":  coin["symbol"],
             "display": coin.get("display", coin["symbol"]),
             "name":    coin["name"],
-            "latest":  _row_to_dict(row),
+            "latest":  _row_to_dict(latest.get(coin["symbol"])),
         })
     return result
 
@@ -621,21 +680,24 @@ def get_crypto_history(
     }),
 )
 def get_history_all(
+    request: Request,
     limit: int = Query(50000, ge=1, le=500000, description="Maximum number of rows to return."),
     db: Session = Depends(get_db),
 ):
-    rows = db.execute(
-        text(
-            "SELECT symbol, date, open, high, low, close, volume "
-            "FROM daily_prices ORDER BY symbol, date ASC LIMIT :limit"
-        ),
-        {"limit": limit},
-    ).fetchall()
-    data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
-    first = data[0] if data else None
-    last = data[-1] if data else None
-    return {"count": len(data), "from": first["date"] if first else None,
-            "to": last["date"] if last else None, "data": data}
+    def _produce():
+        rows = db.execute(
+            text(
+                "SELECT symbol, date, open, high, low, close, volume "
+                "FROM daily_prices ORDER BY symbol, date ASC LIMIT :limit"
+            ),
+            {"limit": limit},
+        ).fetchall()
+        data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
+        first = data[0] if data else None
+        last = data[-1] if data else None
+        return {"count": len(data), "from": first["date"] if first else None,
+                "to": last["date"] if last else None, "data": data}
+    return _gzip_big_response(request, f"history_all:{limit}", cache_stats()["loaded_at"], _produce)
 
 
 @router.get(
@@ -659,21 +721,24 @@ def get_history_all(
     }),
 )
 def get_history_range(
+    request: Request,
     from_date: date = Query(..., alias="from", description="Start date, inclusive. Format `YYYY-MM-DD`.", examples=["2024-01-01"]),
     to_date: date = Query(..., alias="to", description="End date, inclusive. Format `YYYY-MM-DD`.", examples=["2024-12-31"]),
     db: Session = Depends(get_db),
 ):
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="'from' must be less than or equal to 'to'.")
-    rows = db.execute(
-        text(
-            "SELECT symbol, date, open, high, low, close, volume "
-            "FROM daily_prices WHERE date BETWEEN :from AND :to ORDER BY symbol, date ASC"
-        ),
-        {"from": from_date, "to": to_date},
-    ).fetchall()
-    data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
-    return {"count": len(data), "from": str(from_date), "to": str(to_date), "data": data}
+    def _produce():
+        rows = db.execute(
+            text(
+                "SELECT symbol, date, open, high, low, close, volume "
+                "FROM daily_prices WHERE date BETWEEN :from AND :to ORDER BY symbol, date ASC"
+            ),
+            {"from": from_date, "to": to_date},
+        ).fetchall()
+        data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
+        return {"count": len(data), "from": str(from_date), "to": str(to_date), "data": data}
+    return _gzip_big_response(request, f"history_range:{from_date}:{to_date}", cache_stats()["loaded_at"], _produce)
 
 
 @router.get(
@@ -955,7 +1020,7 @@ def get_symbol(
     if row is None:
         raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
     result = {"symbol": symbol, "latest": _row_to_dict(row)}
-    meta = catalog.get_symbol_map().get(symbol)
+    meta = catalog.get_symbol(symbol)
     if meta:
         result["name"] = meta.get("name")
         if "display" in meta:
@@ -994,7 +1059,7 @@ def get_symbol_history(
     if not rows:
         raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
     result = {"symbol": symbol, "count": len(rows), "history": [_row_to_dict(r) for r in rows]}
-    meta = catalog.get_symbol_map().get(symbol)
+    meta = catalog.get_symbol(symbol)
     if meta:
         result["name"] = meta.get("name")
         if "display" in meta:
@@ -1118,20 +1183,26 @@ def get_cache_status():
         ],
     }),
 )
-def get_cache_all():
-    cache = get_all()
-    data = [{"symbol": sym, "history": history} for sym, history in cache.items()]
-    total = sum(len(h) for h in cache.values())
-    return {"count": total, "symbols": len(data), "data": data}
+def get_cache_all(request: Request):
+    fresh = cache_stats()["loaded_at"]
+    def _produce():
+        cache = get_all()
+        data = [{"symbol": sym, "history": history} for sym, history in cache.items()]
+        total = sum(len(h) for h in cache.values())
+        return {"count": total, "symbols": len(data), "data": data}
+    return _gzip_big_response(request, "cache:all", fresh, _produce)
 
 
-def _cache_by_type(symbols: list) -> dict:
-    cache = get_all()
-    wanted = {s["symbol"] for s in symbols}
-    filtered = {sym: hist for sym, hist in cache.items() if sym in wanted}
-    data = [{"symbol": sym, "history": hist} for sym, hist in filtered.items()]
-    total = sum(len(h) for h in filtered.values())
-    return {"count": total, "symbols": len(data), "data": data}
+def _cache_by_type(request: Request, key: str, symbols: list) -> Response:
+    fresh = cache_stats()["loaded_at"]
+    def _produce():
+        cache = get_all()
+        wanted = {s["symbol"] for s in symbols}
+        filtered = {sym: hist for sym, hist in cache.items() if sym in wanted}
+        data = [{"symbol": sym, "history": hist} for sym, hist in filtered.items()]
+        total = sum(len(h) for h in filtered.values())
+        return {"count": total, "symbols": len(data), "data": data}
+    return _gzip_big_response(request, key, fresh, _produce)
 
 
 @router.get(
@@ -1139,8 +1210,8 @@ def _cache_by_type(symbols: list) -> dict:
     summary="All stock histories from memory (fast)",
     description="Returns the full cached 5-year history for every tracked stock straight from the in-memory cache.",
 )
-def get_cache_stocks():
-    return _cache_by_type(catalog.get_group("stock"))
+def get_cache_stocks(request: Request):
+    return _cache_by_type(request, "cache:stocks", catalog.get_group("stock"))
 
 
 @router.get(
@@ -1148,8 +1219,8 @@ def get_cache_stocks():
     summary="All index histories from memory (fast)",
     description="Returns the full cached 5-year history for every tracked index straight from the in-memory cache.",
 )
-def get_cache_indexes():
-    return _cache_by_type(catalog.get_group("index"))
+def get_cache_indexes(request: Request):
+    return _cache_by_type(request, "cache:indexes", catalog.get_group("index"))
 
 
 @router.get(
@@ -1157,8 +1228,8 @@ def get_cache_indexes():
     summary="All metal histories from memory (fast)",
     description="Returns the full cached 5-year history for every tracked precious metal straight from the in-memory cache.",
 )
-def get_cache_metals():
-    return _cache_by_type(catalog.get_group("metal"))
+def get_cache_metals(request: Request):
+    return _cache_by_type(request, "cache:metals", catalog.get_group("metal"))
 
 
 @router.get(
@@ -1166,8 +1237,8 @@ def get_cache_metals():
     summary="All ETF histories from memory (fast)",
     description="Returns the full cached 5-year history for every tracked ETF straight from the in-memory cache.",
 )
-def get_cache_etfs():
-    return _cache_by_type(catalog.get_group("etf"))
+def get_cache_etfs(request: Request):
+    return _cache_by_type(request, "cache:etfs", catalog.get_group("etf"))
 
 
 @router.get(
@@ -1175,8 +1246,8 @@ def get_cache_etfs():
     summary="All crypto histories from memory (fast)",
     description="Returns the full cached 5-year history for every tracked crypto asset straight from the in-memory cache.",
 )
-def get_cache_cryptos():
-    return _cache_by_type(catalog.get_group("crypto"))
+def get_cache_cryptos(request: Request):
+    return _cache_by_type(request, "cache:cryptos", catalog.get_group("crypto"))
 
 
 @router.get(

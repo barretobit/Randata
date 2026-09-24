@@ -13,7 +13,7 @@ A FastAPI Service that tracks daily financial market data for Stocks, Indexes, E
 
 ## Tracked Assets (+100)
 
-Assets are registered in the `assets` table and auto-seeded from the code on startup. Full catalog also available via `GET /finance/assets`.
+Assets are registered in the `assets` table in the database — the single source of truth served by the API. Full catalog also available via `GET /finance/assets`.
 
 <details>
 <summary><strong>FX pairs (+10)</strong> — EUR/USD, CHF/USD, GBP/USD, JPY/USD, CNY/USD, NOK/USD, DKK/USD, HKD/USD, SEK/USD, NZD/USD, AUD/USD, CAD/USD</summary>

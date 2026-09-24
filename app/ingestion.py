@@ -7,7 +7,6 @@ import yfinance as yf
 from sqlalchemy import text
 
 from .asset_repo import get_all_assets, get_history_coverage
-from .assets import ALL_ASSETS
 from .config import (
     BACKFILL_DELAY_SECONDS,
     BACKFILL_JITTER_SECONDS,
@@ -54,14 +53,13 @@ QUOTE_TYPE_TO_ASSET = {
 
 
 def _tracked_symbols():
-    """Symbols to fetch, from the `assets` table (with static-list fallback)."""
+    """Symbols to fetch, from the `assets` table."""
     try:
         assets = get_all_assets()
-        if assets:
-            return [a["symbol"] for a in assets]
+        return [a["symbol"] for a in assets] if assets else []
     except Exception as e:
-        logger.error("Could not read assets table (%s); falling back to static catalogue.", e)
-    return [a["symbol"] for a in ALL_ASSETS]
+        logger.error("Could not read assets table (%s); nothing to fetch.", e)
+        return []
 
 
 def _download_history(symbol: str, period: str, retry_base: float = YF_RETRY_BASE_SECONDS):
@@ -226,13 +224,7 @@ def _has_full_history(coverage, symbol, target_start):
 
 def assets_missing_history(db=None):
     """Tracked assets whose stored history does not span ~5 years."""
-    assets = get_all_assets(db)
-    if not assets:
-        try:
-            assets = [{"symbol": a["symbol"], "name": a["name"],
-                       "asset_type": "unknown", "properties": {}} for a in ALL_ASSETS]
-        except Exception:
-            pass
+    assets = get_all_assets(db) or []
     coverage = get_history_coverage(db)
     target_start = date.today() - timedelta(days=365 * FULL_HISTORY_YEARS)
     missing = [

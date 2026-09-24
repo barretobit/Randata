@@ -3,14 +3,12 @@
 The public catalogue is loaded from the database at startup and refreshed
 whenever an admin adds an asset or recomputes the price cache, so new
 instruments appear in the public endpoints without a redeploy. Mirrors the
-price-cache pattern in cache.py; the static lists in assets.py are only a
-bootstrap seed and a fallback when the table is unavailable.
+price-cache pattern in cache.py.
 """
 
 import threading
 from datetime import datetime, timezone
 
-from .assets import CRYPTO, ETFS, FX_PAIRS, INDEXES, PRECIOUS_METALS, STOCKS
 from .asset_repo import get_all_assets
 from .logging_config import get_logger
 
@@ -25,15 +23,6 @@ _TYPE_TO_GROUP = {
     "crypto": "crypto",
 }
 _GROUPS = list(_TYPE_TO_GROUP.values())
-
-_STATIC_GROUPS = [
-    ("fx",     FX_PAIRS),
-    ("index",  INDEXES),
-    ("metal",  PRECIOUS_METALS),
-    ("stock",  STOCKS),
-    ("etf",    ETFS),
-    ("crypto", CRYPTO),
-]
 
 _MAP_TYPES = ("fx", "index", "stock", "etf", "crypto", "metal")
 
@@ -50,20 +39,7 @@ def _merged(item) -> dict:
     return asset
 
 
-def _static_items():
-    out = []
-    for asset_type, items in _STATIC_GROUPS:
-        for item in items:
-            out.append({
-                "symbol":     item["symbol"],
-                "name":       item["name"],
-                "asset_type": asset_type,
-                "properties": {k: v for k, v in item.items() if k not in ("symbol", "name")},
-            })
-    return out
-
-
-def _build_from(assets) -> None:
+def _build_from(assets) -> int:
     grouped = {g: [] for g in _GROUPS}
     symbol_map = {}
     lower_maps = {t: {} for t in _MAP_TYPES}
@@ -90,25 +66,21 @@ def _build_from(assets) -> None:
     return total
 
 
-def _finish_load(assets) -> bool:
-    global _loaded_at
-    total = _build_from(assets)
-    with _lock:
-        _loaded_at = datetime.now(timezone.utc)
-    logger.info("Catalogue loaded: %d assets grouped by class.", total)
-    return True
-
-
 def load() -> bool:
+    global _loaded_at
     try:
         assets = get_all_assets()
     except Exception as e:
-        logger.error("Could not read assets table (%s); falling back to static catalogue.", e)
-        return _finish_load(_static_items())
-    if not assets:
-        logger.warning("Assets table is empty; falling back to static catalogue.")
-        return _finish_load(_static_items())
-    return _finish_load(assets)
+        logger.error("Could not read the assets table: %s", e)
+        return False
+    total = _build_from(assets)
+    with _lock:
+        _loaded_at = datetime.now(timezone.utc)
+    if total == 0:
+        logger.warning("Catalogue loaded with 0 assets — add symbols via the admin API.")
+    else:
+        logger.info("Catalogue loaded: %d assets grouped by class.", total)
+    return True
 
 
 def invalidate() -> None:
@@ -142,6 +114,11 @@ def get_group(asset_type: str) -> list:
 def get_symbol_map() -> dict:
     with _lock:
         return dict(_symbol_map)
+
+
+def get_symbol(symbol: str):
+    with _lock:
+        return _symbol_map.get(symbol)
 
 
 def get_map(kind: str) -> dict:

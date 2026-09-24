@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from .asset_repo import seed_assets
 from .cache import load as load_cache
 from .catalog import load as load_catalog, refresh as refresh_catalog
 from .db import SessionLocal
@@ -61,7 +60,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+app.add_middleware(GZipMiddleware, minimum_size=4096, compresslevel=5)
 
 @app.get("/")
 async def root():
@@ -79,11 +78,6 @@ app.include_router(homes_router, prefix="/homes", tags=["Homes"])
 
 @app.on_event("startup")
 def startup() -> None:
-    if SessionLocal is not None:
-        try:
-            seed_assets()
-        except Exception as e:
-            logger.error("Could not seed the assets table: %s", e)
     load_catalog()
     load_cache()
 
