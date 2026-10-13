@@ -1,7 +1,8 @@
 """In-memory cache for historical price data.
 
-Loads the last five years of daily_prices rows on startup and refreshes after each ingestion.
-Serves data without hitting the database on read-heavy public endpoints.
+Loads the configured rolling window (CACHE_HISTORY_YEARS) of daily_prices rows
+on startup and refreshes after each ingestion. Serves data without hitting the
+database on read-heavy public endpoints.
 """
 
 import threading
@@ -9,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
+from .config import CACHE_HISTORY_YEARS
 from .db import SessionLocal
 from .logging_config import get_logger
 
@@ -17,7 +19,7 @@ logger = get_logger("cache")
 _lock = threading.Lock()
 _cache: dict[str, list[dict]] = {}
 _loaded_at: datetime | None = None
-_CACHE_HISTORY_DAYS = 365 * 5
+_CACHE_HISTORY_DAYS = 365 * CACHE_HISTORY_YEARS
 
 
 def _row_to_dict(row) -> dict:
@@ -32,7 +34,7 @@ def _row_to_dict(row) -> dict:
 
 
 def load() -> bool:
-    """Load the last five years of historical data from the database into memory."""
+    """Load the configured rolling window of historical data from the database into memory."""
     global _loaded_at
     if SessionLocal is None:
         logger.warning("No database connection — cache not loaded.")

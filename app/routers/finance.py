@@ -16,7 +16,14 @@ from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_
 from ..cache import details as cache_details, get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
 from ..config import ADMIN_KEY, SLOW_YF_RETRY_BASE_SECONDS
 from ..db import engine, get_db
-from ..ingestion import backfill, backfill_all, backfill_missing, check_symbol, ingest_daily_all
+from ..ingestion import (
+    backfill,
+    backfill_all,
+    backfill_inception_dates,
+    backfill_missing,
+    check_symbol,
+    ingest_daily_all,
+)
 
 router = APIRouter()
 
@@ -188,7 +195,7 @@ def get_fx_rate(
     summary="Full history for one FX pair",
     description=(
         "All stored daily bars (oldest first) for a single FX pair. "
-        "With a fresh backfill this covers roughly 5 years."
+        "With a fresh backfill this covers roughly the configured history window."
     ),
     responses=_resp({
         "symbol": "EURUSD=X",
@@ -283,7 +290,7 @@ def get_index(
     summary="Full history for one index",
     description=(
         "All stored daily bars (oldest first) for a single index. "
-        "With a fresh backfill this covers roughly 5 years."
+        "With a fresh backfill this covers roughly the configured history window."
     ),
     responses=_resp({
         "symbol": "^GSPC",
@@ -380,7 +387,7 @@ def get_metal(
     summary="Full history for one precious metal",
     description=(
         "All stored daily bars (oldest first) for a single precious metal. "
-        "With a fresh backfill this covers roughly 5 years."
+        "With a fresh backfill this covers roughly the configured history window."
     ),
     responses=_resp({
         "symbol": "GC=F",
@@ -782,9 +789,9 @@ def list_assets():
 
 @router.get(
     "/admin/backfill-symbol",
-    summary="Backfill 5 years for a single symbol (admin, fast)",
+    summary="Backfill history for a single symbol (admin, fast)",
     description=(
-        "**Fast path:** downloads ~5 years of daily data for **one arbitrary Yahoo Finance symbol** "
+        "**Fast path:** downloads the configured history window of daily data for **one arbitrary Yahoo Finance symbol** "
         "in a single request — the way to add a new instrument without restarting or editing the "
         "asset list. Because it hits Yahoo once, no inter-request throttling is needed; it still "
         "retries with exponential backoff if rate limited.\n\n"
@@ -871,7 +878,7 @@ def check_asset_symbol(
         "Inserts a new symbol into the `assets` table. `name` and `asset_type` are optional: "
         "if omitted they are inferred from Yahoo Finance (`asset_type` must then be one of "
         "`fx`, `index`, `metal`, `stock`, `etf`, `crypto`). After adding, use "
-        "`POST /finance/admin/assets/{symbol}/backfill` to fetch its 5-year history."
+        "`POST /finance/admin/assets/{symbol}/backfill` to fetch its history."
     ),
     responses=_resp({
         "symbol": "LTC-USD",
@@ -887,6 +894,7 @@ def add_tracked_asset(payload: AddAssetRequest):
             status_code=409, detail=f"Symbol '{payload.symbol}' is already tracked."
         )
     name, asset_type = payload.name, payload.asset_type
+    inception_date = None
     if name is None or asset_type is None:
         chk = check_symbol(payload.symbol)
         if not chk["exists"]:
@@ -896,13 +904,15 @@ def add_tracked_asset(payload: AddAssetRequest):
             )
         name = name or chk["name"] or payload.symbol
         asset_type = asset_type or chk["suggested_type"]
+        inception_date = chk.get("inception_date")
         if asset_type is None:
             raise HTTPException(
                 status_code=422,
                 detail="Could not infer an asset category. Provide an explicit asset_type.",
             )
     try:
-        asset = add_asset(payload.symbol, name, asset_type, payload.properties)
+        asset = add_asset(payload.symbol, name, asset_type, payload.properties,
+                          inception_date=inception_date)
         catalog.refresh()
         return asset
     except ValueError as e:
@@ -916,9 +926,9 @@ def add_tracked_asset(payload: AddAssetRequest):
         "One-call onboarding. Given only a Yahoo Finance symbol this endpoint:\n\n"
         "1. Verifies the symbol and pulls its metadata (name + suggested asset type) from Yahoo Finance.\n"
         "2. Inserts the asset into the `assets` catalogue, so it appears in every public endpoint.\n"
-        "3. Backfills ~5 years of daily history (gentle exponential backoff on rate limits).\n"
+        "3. Backfills the configured history window of daily data (gentle exponential backoff on rate limits).\n"
         "4. Rebuilds the in-memory catalogue and price cache so the new asset is served everywhere.\n\n"
-        "Takes roughly a minute — the 5-year download dominates the runtime.\n\n"
+        "Takes roughly a minute — the history download dominates the runtime.\n\n"
         "Errors: `409` if the symbol is already tracked, `422` if Yahoo cannot identify it or an "
         "asset type cannot be inferred (`name`/`asset_type` can be provided as overrides), `502` if "
         "the asset was added but the backfill failed (safe to retry via "
@@ -955,7 +965,7 @@ def onboard_asset(payload: OnboardAssetRequest, db: Session = Depends(get_db)):
         )
 
     try:
-        asset = add_asset(symbol, name, asset_type)
+        asset = add_asset(symbol, name, asset_type, inception_date=chk.get("inception_date"))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -965,7 +975,7 @@ def onboard_asset(payload: OnboardAssetRequest, db: Session = Depends(get_db)):
         catalog.refresh()
         raise HTTPException(
             status_code=502,
-            detail=f"Asset '{symbol}' was added, but the 5-year backfill failed: {e}. "
+            detail=f"Asset '{symbol}' was added, but the history backfill failed: {e}. "
                    f"Retry via POST /finance/admin/assets/{symbol}/backfill.",
         )
 
@@ -984,9 +994,9 @@ def onboard_asset(payload: OnboardAssetRequest, db: Session = Depends(get_db)):
 
 @router.post(
     "/admin/assets/{symbol}/backfill",
-    summary="Backfill 5 years for a single tracked asset (admin, fast)",
+    summary="Backfill history for a single tracked asset (admin, fast)",
     description=(
-        "**Fast path:** downloads ~5 years of daily history for **one asset already present in the "
+        "**Fast path:** downloads the configured history window of daily data for **one asset already present in the "
         "`assets` table** in a single request (no inter-request throttling needed; still retries "
         "with exponential backoff on rate limits). Upserts, so re-running just refreshes stored "
         "rows.\n\n"
@@ -1052,7 +1062,7 @@ def get_cache_details():
     summary="Refresh the in-memory cache (admin)",
     description=(
         "Deletes the current in-memory cache and rebuilds it from the database using the "
-        "rolling five years of daily price history. This does not fetch data from Yahoo "
+        "rolling history window of daily price data. This does not fetch data from Yahoo "
         "Finance. Protected by the `X-Admin-Key` header."
     ),
     responses=_resp({
@@ -1168,7 +1178,7 @@ def _ingestion_summary(db: Session, results):
     "/admin/backfill",
     summary="Backfill ALL assets (admin, medium speed)",
     description=(
-        "Triggers the full 5-year backfill for **all tracked assets** (whether or not they "
+        "Triggers the full history-window backfill for **all tracked assets** (whether or not they "
         "already have history) and stores the data in the database. Throttled with the normal "
         "delay config (`BACKFILL_DELAY_SECONDS`, default ~2s between symbols). Protected by the "
         "`X-Admin-Key` header (send the value of the `ADMIN_KEY` environment variable). Takes "
@@ -1200,9 +1210,11 @@ def run_backfill(db: Session = Depends(get_db)):
     "/admin/backfill-missing",
     summary="Backfill missing history (admin, slow & safe)",
     description=(
-        "**Slow path, purpose-built to avoid Yahoo rate limits.** Downloads ~5 years of daily "
-        "history **only for tracked assets whose stored data does not span ~5 years** (newly "
-        "added assets, partially backfilled symbols, assets with only recent daily ingestion).\n\n"
+        "**Slow path, purpose-built to avoid Yahoo rate limits.** Downloads the configured history "
+        "window of daily data **only for tracked assets whose stored data does not reach their "
+        "expected start** (newly added assets, partially backfilled symbols, assets with only recent "
+        "daily ingestion). Assets younger than the window are measured against their `inception_date`, "
+        "so they are not re-fetched once their full available history is stored.\n\n"
         "It spaces every symbol out with a generous delay (default ~12s + jitter between "
         "symbols, configurable via `SLOW_BACKFILL_DELAY_SECONDS` / `SLOW_BACKFILL_JITTER_SECONDS`) "
         "and uses a gentler exponential backoff on rate limits "
@@ -1228,6 +1240,41 @@ def run_backfill_missing(db: Session = Depends(get_db)):
     refresh_cache()
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "results": _ingestion_summary(db, results)}
+
+
+@router.post(
+    "/admin/assets/backfill-inception-dates",
+    summary="Capture missing inception dates (admin, slow)",
+    description=(
+        "Fetches the first-trade date (`inception_date`) from Yahoo Finance for every tracked "
+        "asset that does not have one yet. The inception date lets the backfill logic tell a "
+        "genuinely young instrument (e.g. an IPO from 3 years ago) apart from one with an "
+        "incomplete fetch, so young assets stop being re-fetched forever.\n\n"
+        "Paced with the slow throttle (`SLOW_BACKFILL_DELAY_SECONDS`) because it issues one "
+        "Yahoo request per asset. Safe to re-run: assets that already have a date are skipped. "
+        "Protected by the `X-Admin-Key` header."
+    ),
+    responses=_resp({
+        "status": "done",
+        "fetched_at": "2026-09-08T12:00:00+00:00",
+        "results": [
+            {"symbol": "NVDA", "inception_date": "1999-01-22"},
+            {"symbol": "SOME-IPO", "inception_date": "2023-04-11"},
+        ],
+    }),
+    dependencies=[Depends(require_admin)],
+)
+def run_backfill_inception_dates():
+    results = backfill_inception_dates()
+    catalog.refresh()
+    return {
+        "status":     "done",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "results":    [
+            {"symbol": symbol, "inception_date": value}
+            for symbol, value in results.items()
+        ],
+    }
 
 
 @router.get(
@@ -1287,7 +1334,7 @@ def _cache_by_type(request: Request, key: str, symbols: list) -> Response:
 @router.get(
     "/cache/stocks",
     summary="All stock histories from memory (fast)",
-    description="Returns the full cached 5-year history for every tracked stock straight from the in-memory cache.",
+    description="Returns the full cached history window for every tracked stock straight from the in-memory cache.",
 )
 def get_cache_stocks(request: Request):
     return _cache_by_type(request, "cache:stocks", catalog.get_group("stock"))
@@ -1296,7 +1343,7 @@ def get_cache_stocks(request: Request):
 @router.get(
     "/cache/indexes",
     summary="All index histories from memory (fast)",
-    description="Returns the full cached 5-year history for every tracked index straight from the in-memory cache.",
+    description="Returns the full cached history window for every tracked index straight from the in-memory cache.",
 )
 def get_cache_indexes(request: Request):
     return _cache_by_type(request, "cache:indexes", catalog.get_group("index"))
@@ -1305,7 +1352,7 @@ def get_cache_indexes(request: Request):
 @router.get(
     "/cache/metals",
     summary="All metal histories from memory (fast)",
-    description="Returns the full cached 5-year history for every tracked precious metal straight from the in-memory cache.",
+    description="Returns the full cached history window for every tracked precious metal straight from the in-memory cache.",
 )
 def get_cache_metals(request: Request):
     return _cache_by_type(request, "cache:metals", catalog.get_group("metal"))
@@ -1314,7 +1361,7 @@ def get_cache_metals(request: Request):
 @router.get(
     "/cache/etfs",
     summary="All ETF histories from memory (fast)",
-    description="Returns the full cached 5-year history for every tracked ETF straight from the in-memory cache.",
+    description="Returns the full cached history window for every tracked ETF straight from the in-memory cache.",
 )
 def get_cache_etfs(request: Request):
     return _cache_by_type(request, "cache:etfs", catalog.get_group("etf"))
@@ -1323,7 +1370,7 @@ def get_cache_etfs(request: Request):
 @router.get(
     "/cache/cryptos",
     summary="All crypto histories from memory (fast)",
-    description="Returns the full cached 5-year history for every tracked crypto asset straight from the in-memory cache.",
+    description="Returns the full cached history window for every tracked crypto asset straight from the in-memory cache.",
 )
 def get_cache_cryptos(request: Request):
     return _cache_by_type(request, "cache:cryptos", catalog.get_group("crypto"))

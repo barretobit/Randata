@@ -1,15 +1,22 @@
 import random
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
 from sqlalchemy import text
 
-from .asset_repo import get_all_assets, get_history_coverage
+from .asset_repo import (
+    get_all_assets,
+    get_assets_missing_inception,
+    get_history_coverage,
+    set_inception_date,
+)
 from .config import (
     BACKFILL_DELAY_SECONDS,
     BACKFILL_JITTER_SECONDS,
+    HISTORY_GRACE_DAYS,
+    HISTORY_YEARS,
     INGEST_DELAY_SECONDS,
     INGEST_JITTER_SECONDS,
     SLOW_BACKFILL_DELAY_SECONDS,
@@ -94,6 +101,24 @@ def _info_is_meaningful(info):
     return any(info.get(k) is not None for k in _INFO_MEANINGFUL_KEYS)
 
 
+def _inception_from_info(info):
+    """Extract an asset's first-trade date from a Yahoo `info` payload.
+
+    Yahoo exposes `firstTradeDateEpochUtc` (epoch seconds). Returns a `date` or
+    None when unavailable. This is only a hint — for fx/crypto/index the value
+    can be the data provider's start rather than a true listing date.
+    """
+    if not isinstance(info, dict):
+        return None
+    epoch = info.get("firstTradeDateEpochUtc")
+    if epoch is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(epoch), tz=timezone.utc).date()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
 def check_symbol(symbol: str):
     """Verify a symbol exists on Yahoo Finance using both yf.Ticker and yf.download.
 
@@ -129,9 +154,11 @@ def check_symbol(symbol: str):
 
     name = None
     quote_type = None
+    inception_date = None
     if info:
         name = info.get("longName") or info.get("shortName")
         quote_type = info.get("quoteType")
+        inception_date = _inception_from_info(info)
 
     latest_close = None
     if df is not None:
@@ -155,6 +182,7 @@ def check_symbol(symbol: str):
         "confirmed_by":   sources,
         "name":           name,
         "suggested_type": QUOTE_TYPE_TO_ASSET.get(quote_type) if quote_type else None,
+        "inception_date": inception_date,
         "latest_close":   latest_close,
         "note":           note,
     }
@@ -202,38 +230,103 @@ def _fetch_and_store(symbol: str, period: str, retry_base: float = YF_RETRY_BASE
 
 
 def backfill(symbol: str, retry_base: float = YF_RETRY_BASE_SECONDS) -> int:
-    return _fetch_and_store(symbol, period="5y", retry_base=retry_base)
+    return _fetch_and_store(symbol, period=f"{HISTORY_YEARS}y", retry_base=retry_base)
 
 
 def ingest_daily(symbol: str) -> int:
     return _fetch_and_store(symbol, period="5d")
 
 
-# How far before the 5-year window the stored data may start/end and still
-# count as "covered" (tolerates weekends/holidays and multi-day backfills).
-FULL_HISTORY_YEARS = 5
-FULL_HISTORY_GRACE_DAYS = 14
+def _window_start(today=None):
+    """Start of the rolling fetch window (today minus HISTORY_YEARS)."""
+    today = today or date.today()
+    return today - timedelta(days=365 * HISTORY_YEARS)
 
 
-def _has_full_history(coverage, symbol, target_start):
-    cov = coverage.get(symbol)
+def _expected_start(asset, window_start):
+    """Earliest date we can reasonably expect history for.
+
+    Assets that started trading after the window began only need history since
+    their inception, so we look no further back than that. Without a known
+    inception we fall back to the full window.
+    """
+    inception = asset.get("inception_date")
+    if inception is not None and inception > window_start:
+        return inception
+    return window_start
+
+
+def _has_full_history(asset, coverage, window_start):
+    cov = coverage.get(asset["symbol"])
     if cov is None or cov["count"] == 0 or cov["first_date"] is None:
         return False
-    return cov["first_date"] <= target_start + timedelta(days=FULL_HISTORY_GRACE_DAYS)
+    expected = _expected_start(asset, window_start)
+    return cov["first_date"] <= expected + timedelta(days=HISTORY_GRACE_DAYS)
 
 
 def assets_missing_history(db=None):
-    """Tracked assets whose stored history does not span ~5 years."""
+    """Tracked assets whose stored history does not reach their expected start.
+
+    The expected start is the rolling HISTORY_YEARS window, unless the asset's
+    inception date is later — in which case only history since inception is
+    required. This keeps genuinely young instruments out of the re-fetch loop.
+    """
     assets = get_all_assets(db) or []
     coverage = get_history_coverage(db)
-    target_start = date.today() - timedelta(days=365 * FULL_HISTORY_YEARS)
+    window_start = _window_start()
     missing = [
         a for a in assets
-        if not _has_full_history(coverage, a["symbol"], target_start)
+        if not _has_full_history(a, coverage, window_start)
     ]
-    logger.info("%d of %d tracked assets lack ~%dy of history.",
-                len(missing), len(assets), FULL_HISTORY_YEARS)
+    logger.info("%d of %d tracked assets lack history back to their expected start (~%dy window).",
+                len(missing), len(assets), HISTORY_YEARS)
     return missing
+
+
+def fetch_inception_date(symbol: str, retry_base: float = YF_RETRY_BASE_SECONDS):
+    """Fetch a symbol's first-trade date from Yahoo, or None if unavailable."""
+    attempt = 1
+    while True:
+        try:
+            info = yf.Ticker(symbol).info
+            return _inception_from_info(info)
+        except YFRateLimitError:
+            if attempt > YF_MAX_RETRIES:
+                raise
+            wait = retry_base * (2 ** (attempt - 1))
+            logger.warning(
+                "Rate limit hit fetching inception for %s (attempt %d/%d). Waiting %.1fs...",
+                symbol, attempt, YF_MAX_RETRIES, wait,
+            )
+            time.sleep(wait)
+            attempt += 1
+        except Exception as e:
+            logger.warning("Could not fetch inception date for %s: %s", symbol, e)
+            return None
+
+
+def backfill_inception_dates(
+    delay: float = SLOW_BACKFILL_DELAY_SECONDS,
+    jitter: float = SLOW_BACKFILL_JITTER_SECONDS,
+    retry_base: float = SLOW_YF_RETRY_BASE_SECONDS,
+) -> dict:
+    """Capture the inception date for every asset that does not have one yet."""
+    assets = get_assets_missing_inception() or []
+    results = {}
+    for i, asset in enumerate(assets):
+        symbol = asset["symbol"]
+        try:
+            inception = fetch_inception_date(symbol, retry_base=retry_base)
+            if inception is not None:
+                set_inception_date(symbol, inception)
+            results[symbol] = str(inception) if inception is not None else None
+        except Exception as e:
+            results[symbol] = f"ERROR: {e}"
+            logger.error("inception backfill failed for %s: %s", symbol, e)
+        if i < len(assets) - 1:
+            _throttle(delay, jitter)
+    logger.info("inception backfill finished: %d assets", len(assets))
+    return results
 
 
 def _throttle(delay: float, jitter: float):
@@ -262,7 +355,7 @@ def backfill_missing(
     jitter: float = SLOW_BACKFILL_JITTER_SECONDS,
     retry_base: float = SLOW_YF_RETRY_BASE_SECONDS,
 ):
-    """Slow, extra-gentle backfill of only the assets missing ~5 years of history."""
+    """Slow, extra-gentle backfill of only the assets missing their expected history."""
     assets = assets_missing_history()
     symbols = [a["symbol"] for a in assets]
     logger.info("backfill_missing (slow mode) covering %d assets...", len(symbols))

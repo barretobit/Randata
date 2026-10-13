@@ -82,7 +82,7 @@ Assets are registered in the `assets` table in the database — the single sourc
 - Solana — `SOL-USD`
 </details>
 
-The list above is the catalogue available today. More assets (stocks, ETFs, FX pairs, indexes, metals, crypto) can be added on demand via `POST /finance/admin/assets` — the endpoint validates the symbol against Yahoo Finance live, so the catalogue is not fixed to this list. For fully automated onboarding, `POST /finance/admin/assets/onboard` verifies the symbol, adds the asset, backfills exactly 5 years of history, and refreshes the cache in a single call.
+The list above is the catalogue available today. More assets (stocks, ETFs, FX pairs, indexes, metals, crypto) can be added on demand via `POST /finance/admin/assets` — the endpoint validates the symbol against Yahoo Finance live, so the catalogue is not fixed to this list. For fully automated onboarding, `POST /finance/admin/assets/onboard` verifies the symbol, adds the asset, backfills the configured history window, and refreshes the cache in a single call.
 
 ## Public endpoints
 
@@ -90,22 +90,22 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | ------ | ----------------------------------- | ----------------------------------------------------------------- |
 | GET    | `/finance/fx/rates`                 | Latest price for all FX pairs                                     |
 | GET    | `/finance/fx/rates/{pair}`          | Latest price for one pair (e.g. `EURUSD`)                         |
-| GET    | `/finance/fx/history/{pair}`        | 5-year daily history for one pair                                 |
+| GET    | `/finance/fx/history/{pair}`        | Full-window daily history for one pair                                 |
 | GET    | `/finance/indexes`                  | Latest value for all indexes                                      |
 | GET    | `/finance/indexes/{symbol}`         | Latest value for one index (e.g. `^GSPC`, `^N225`)                |
-| GET    | `/finance/indexes/{symbol}/history` | 5-year daily history for one index                                |
+| GET    | `/finance/indexes/{symbol}/history` | Full-window daily history for one index                                |
 | GET    | `/finance/metals`                   | Latest price for all metals                                       |
 | GET    | `/finance/metals/{metal}`           | Latest price for one metal (`gold`, `silver`, `copper`, …)        |
-| GET    | `/finance/metals/{metal}/history`   | 5-year daily history for one metal                                |
+| GET    | `/finance/metals/{metal}/history`   | Full-window daily history for one metal                                |
 | GET    | `/finance/stocks`                   | Latest price for all stocks                                       |
 | GET    | `/finance/stocks/{symbol}`          | Latest price for one stock (e.g. `NVDA`)                          |
-| GET    | `/finance/stocks/{symbol}/history`  | 5-year daily history for one stock                                |
+| GET    | `/finance/stocks/{symbol}/history`  | Full-window daily history for one stock                                |
 | GET    | `/finance/etfs`                     | Latest price for all ETFs                                         |
 | GET    | `/finance/etfs/{symbol}`            | Latest price for one ETF (e.g. `VOO`, `QQQ`)                      |
-| GET    | `/finance/etfs/{symbol}/history`    | 5-year daily history for one ETF                                  |
+| GET    | `/finance/etfs/{symbol}/history`    | Full-window daily history for one ETF                                  |
 | GET    | `/finance/crypto`                   | Latest price for all cryptocurrencies                             |
 | GET    | `/finance/crypto/{symbol}`          | Latest price for one crypto (e.g. `BTC-USD`)                      |
-| GET    | `/finance/crypto/{symbol}/history`  | 5-year daily history for one crypto                               |
+| GET    | `/finance/crypto/{symbol}/history`  | Full-window daily history for one crypto                               |
 | GET    | `/finance/history/all`              | Full dump, every stored bar, all assets (default cap 50,000 rows) |
 | GET    | `/finance/history/range?from&to`    | Every bar between two inclusive dates, all assets (`YYYY-MM-DD`)  |
 | GET    | `/finance/symbol/{symbol}`          | Latest bar for any stored symbol (incl. ad-hoc additions)         |
@@ -128,13 +128,14 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/admin/assets`                   | List tracked assets from the `assets` table                                                |
 | GET    | `/finance/admin/assets/check?symbol=`     | Verify a symbol exists on Yahoo Finance (combines `yf.Ticker` + `yf.download`)             |
 | POST   | `/finance/admin/assets`                   | Add an asset to the tracked catalogue (name/type auto-inferred from Yahoo)                 |
-| POST   | `/finance/admin/assets/onboard`           | One-call onboarding: verify symbol → add asset → 5y backfill → refresh cache (~1 min)      |
-| POST   | `/finance/admin/assets/{symbol}/backfill` | **Fast** 5-year backfill for one tracked asset                                             |
-| GET    | `/finance/admin/backfill-symbol`          | **Fast** 5-year backfill for one arbitrary Yahoo symbol                                    |
-| POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing ~5y history (gentle pacing, no rate-limit risk) |
+| POST   | `/finance/admin/assets/onboard`           | One-call onboarding: verify symbol → add asset → full backfill → refresh cache (~1 min)    |
+| POST   | `/finance/admin/assets/{symbol}/backfill` | **Fast** full-window backfill for one tracked asset                                        |
+| GET    | `/finance/admin/backfill-symbol`          | **Fast** full-window backfill for one arbitrary Yahoo symbol                               |
+| POST   | `/finance/admin/backfill-inception-dates` | **Slow** capture missing `inception_date`s so young assets are not re-fetched              |
+| POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing their expected history (gentle pacing)          |
 | POST   | `/finance/admin/backfill`                 | **Medium** backfill of ALL assets (throttled ~2s between symbols)                          |
 | POST   | `/finance/admin/ingest-daily`             | Run the daily fetch now                                                                    |
-| POST   | `/finance/admin/cache/refresh`             | Clear and rebuild the cache from the last 5 years in the database                          |
+| POST   | `/finance/admin/cache/refresh`             | Clear and rebuild the cache from the configured window in the database                     |
 | GET    | `/finance/admin/cache/details`            | Detailed cache report (per-symbol coverage, rows, estimated memory)                        |
 | GET    | `/finance/logs`                           | Recent ingestion logs (last 7 days)                                                        |
 
@@ -152,10 +153,10 @@ The scheduler runs the daily fetch automatically on weekdays at:
 
 ## In-memory cache
 
-The rolling last five years of `daily_prices` rows are loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages.
+The rolling `CACHE_HISTORY_YEARS` window (default: `HISTORY_YEARS`) of `daily_prices` rows is loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages.
 
-- **Memory footprint:** ~116 assets × ~1,300 bars ≈ 150k rows ≈ **~70 MB** (grows ~52 KB/day from the daily fetch — negligible).
-- **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data or `POST /finance/admin/cache/refresh` is called. Cache loads include the rolling last five years from the database, so stale data is never served during a refresh cycle.
+- **Memory footprint:** grows with the number of assets and the window length (e.g. ~116 assets × ~1,300 bars ≈ 150k rows ≈ **~70 MB** at 5 years, roughly double at 10 years).
+- **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data or `POST /finance/admin/cache/refresh` is called. Cache loads include the rolling window from the database, so stale data is never served during a refresh cycle.
 - **Monitoring:** `GET /finance/cache/status` (public) gives quick stats; `GET /finance/admin/cache/details` (admin) gives per-symbol coverage and an estimated memory footprint — handy to confirm the cache rebuilt correctly after a deploy.
 
 > Note: the cache is in-process, so every deploy starts fresh and rebuilds from the database in a few seconds.

@@ -18,10 +18,11 @@ def _row_to_asset(row):
     if isinstance(props, str):
         props = json.loads(props) if props else {}
     return {
-        "symbol":     row.symbol,
-        "name":       row.name,
-        "asset_type": row.asset_type,
-        "properties": props or {},
+        "symbol":         row.symbol,
+        "name":           row.name,
+        "asset_type":     row.asset_type,
+        "properties":     props or {},
+        "inception_date": row.inception_date,
     }
 
 
@@ -37,7 +38,10 @@ def get_all_assets(db=None):
         db = SessionLocal()
     try:
         rows = db.execute(
-            text("SELECT symbol, name, asset_type, properties FROM assets ORDER BY id")
+            text(
+                "SELECT symbol, name, asset_type, properties, inception_date "
+                "FROM assets ORDER BY id"
+            )
         ).fetchall()
     finally:
         _close(db, own)
@@ -52,7 +56,7 @@ def get_asset(symbol, db=None):
     try:
         row = db.execute(
             text(
-                "SELECT symbol, name, asset_type, properties "
+                "SELECT symbol, name, asset_type, properties, inception_date "
                 "FROM assets WHERE symbol = :symbol"
             ),
             {"symbol": symbol},
@@ -93,7 +97,7 @@ def get_history_coverage(db=None):
     }
 
 
-def add_asset(symbol, name, asset_type, properties=None, db=None):
+def add_asset(symbol, name, asset_type, properties=None, inception_date=None, db=None):
     """Insert a new tracked asset. Raises ValueError on duplicate or invalid type."""
     if asset_type not in VALID_TYPES:
         raise ValueError(
@@ -105,14 +109,15 @@ def add_asset(symbol, name, asset_type, properties=None, db=None):
     try:
         db.execute(
             text(
-                "INSERT INTO assets (symbol, name, asset_type, properties) "
-                "VALUES (:symbol, :name, :asset_type, :properties)"
+                "INSERT INTO assets (symbol, name, asset_type, properties, inception_date) "
+                "VALUES (:symbol, :name, :asset_type, :properties, :inception_date)"
             ),
             {
-                "symbol":     symbol,
-                "name":       name,
-                "asset_type": asset_type,
-                "properties": json.dumps(properties or {}),
+                "symbol":         symbol,
+                "name":           name,
+                "asset_type":     asset_type,
+                "properties":     json.dumps(properties or {}),
+                "inception_date": inception_date,
             },
         )
         db.commit()
@@ -122,3 +127,38 @@ def add_asset(symbol, name, asset_type, properties=None, db=None):
     finally:
         _close(db, own)
     return get_asset(symbol)
+
+
+def set_inception_date(symbol, inception_date, db=None):
+    """Persist an asset's inception/first-trade date. No-op if it is already set."""
+    own = db is None
+    if own:
+        db = SessionLocal()
+    try:
+        db.execute(
+            text(
+                "UPDATE assets SET inception_date = :inception_date "
+                "WHERE symbol = :symbol AND inception_date IS NULL"
+            ),
+            {"symbol": symbol, "inception_date": inception_date},
+        )
+        db.commit()
+    finally:
+        _close(db, own)
+
+
+def get_assets_missing_inception(db=None):
+    """Tracked assets whose inception_date has not been captured yet."""
+    own = db is None
+    if own:
+        db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT symbol, name, asset_type, properties, inception_date "
+                "FROM assets WHERE inception_date IS NULL ORDER BY id"
+            )
+        ).fetchall()
+    finally:
+        _close(db, own)
+    return [_row_to_asset(row) for row in rows]

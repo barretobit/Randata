@@ -7,6 +7,17 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 
+# How many years of daily history to fetch and consider "full". The rolling
+# window start is `today - 365 * HISTORY_YEARS`. Assets whose inception date is
+# later than that are only expected to have history since inception.
+HISTORY_YEARS = int(os.getenv("HISTORY_YEARS", "10"))
+# Tolerance (weekends/holidays/multi-day backfills) when deciding whether an
+# asset's stored history reaches back far enough to count as covered.
+HISTORY_GRACE_DAYS = int(os.getenv("HISTORY_GRACE_DAYS", "14"))
+# Years of history to hold in the in-memory price cache. Kept separate from
+# HISTORY_YEARS so the DB can store more than is served from RAM.
+CACHE_HISTORY_YEARS = int(os.getenv("CACHE_HISTORY_YEARS", str(HISTORY_YEARS)))
+
 # Throttling for large multi-symbol Yahoo Finance fetches.
 BACKFILL_DELAY_SECONDS = float(os.getenv("BACKFILL_DELAY_SECONDS", "2.0"))
 BACKFILL_JITTER_SECONDS = float(os.getenv("BACKFILL_JITTER_SECONDS", "1.0"))
