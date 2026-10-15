@@ -107,7 +107,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/crypto/{symbol}`          | Latest price for one crypto (e.g. `BTC-USD`)                      |
 | GET    | `/finance/crypto/{symbol}/history`  | Full-window daily history for one crypto                               |
 | GET    | `/finance/history/all`              | Full dump, every stored bar, all assets (default cap 50,000 rows) |
-| GET    | `/finance/history/range?from&to`    | Every bar between two inclusive dates, all assets (`YYYY-MM-DD`)  |
+| GET    | `/finance/history/range?from&to`    | Every bar between two dates, all assets (served from cache when `from` is within the cache window, else DB) |
 | GET    | `/finance/symbol/{symbol}`          | Latest bar for any stored symbol (incl. ad-hoc additions)         |
 | GET    | `/finance/symbol/{symbol}/history`  | Full history for any stored symbol                                |
 | GET    | `/finance/assets`                   | Full catalogue of tracked assets, grouped by type                 |
@@ -153,9 +153,10 @@ The scheduler runs the daily fetch automatically on weekdays at:
 
 ## In-memory cache
 
-The rolling `CACHE_HISTORY_YEARS` window (default: `HISTORY_YEARS`) of `daily_prices` rows is loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages.
+The rolling `CACHE_HISTORY_YEARS` window of `daily_prices` rows is loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages. This is intentionally smaller than `HISTORY_YEARS`: the database stores the full history (see `/finance/*/history`), while the RAM cache is capped to fit the host's memory budget.
 
-- **Memory footprint:** grows with the number of assets and the window length (e.g. ~116 assets × ~1,300 bars ≈ 150k rows ≈ **~70 MB** at 5 years, roughly double at 10 years).
+- **Memory footprint:** ~**400 bytes per row** (the cache holds Python dicts) ≈ 20 MB for ~47k rows (1y), 95 MB (5y) and ~190 MB (10y). The default is `CACHE_HISTORY_YEARS=1` so a 512 Mi instance stays well within budget; raise it only if the deployment has more RAM.
+- **Consumer pattern:** a client's first load pulls the full 10-year history via `/finance/history/all` or `/finance/history/range` (database). Subsequent incremental loads pass a recent `from` date to `/finance/history/range`, which is then served from this cache with no database round-trip.
 - **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data or `POST /finance/admin/cache/refresh` is called. Cache loads include the rolling window from the database, so stale data is never served during a refresh cycle.
 - **Monitoring:** `GET /finance/cache/status` (public) gives quick stats; `GET /finance/admin/cache/details` (admin) gives per-symbol coverage and an estimated memory footprint — handy to confirm the cache rebuilt correctly after a deploy.
 

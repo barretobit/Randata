@@ -14,9 +14,13 @@ HISTORY_YEARS = int(os.getenv("HISTORY_YEARS", "10"))
 # Tolerance (weekends/holidays/multi-day backfills) when deciding whether an
 # asset's stored history reaches back far enough to count as covered.
 HISTORY_GRACE_DAYS = int(os.getenv("HISTORY_GRACE_DAYS", "14"))
-# Years of history to hold in the in-memory price cache. Kept separate from
-# HISTORY_YEARS so the DB can store more than is served from RAM.
-CACHE_HISTORY_YEARS = int(os.getenv("CACHE_HISTORY_YEARS", str(HISTORY_YEARS)))
+# Years of history to hold in the in-memory price cache. Deliberately kept
+# separate from (and much smaller than) HISTORY_YEARS: the database stores the
+# full history, but the RAM cache must stay within the host's memory budget.
+# The cache serves recent date-range reads without touching the database; a
+# full initial load (10y) is expected to go to the database once. At ~400
+# bytes/row, 1y x ~186 assets (~47k rows) is only ~20 MB.
+CACHE_HISTORY_YEARS = int(os.getenv("CACHE_HISTORY_YEARS", "1"))
 
 # Throttling for large multi-symbol Yahoo Finance fetches.
 BACKFILL_DELAY_SECONDS = float(os.getenv("BACKFILL_DELAY_SECONDS", "2.0"))

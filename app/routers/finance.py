@@ -1,7 +1,7 @@
 import gzip
 import json
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .. import catalog
 from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets
 from ..cache import details as cache_details, get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
-from ..config import ADMIN_KEY, SLOW_YF_RETRY_BASE_SECONDS
+from ..config import ADMIN_KEY, CACHE_HISTORY_YEARS, SLOW_YF_RETRY_BASE_SECONDS
 from ..db import engine, get_db
 from ..ingestion import (
     backfill,
@@ -677,8 +677,8 @@ def get_crypto_history(
         "Returns **every stored daily bar** for every asset in one response, "
         "sorted by symbol then date (oldest first). Each entry contains the `symbol` plus "
         "`date, open, high, low, close, volume`.\n\n"
-        "This is the big export endpoint — the default cap is 50,000 rows "
-        "(the full 5-year dataset is ~31,000)."
+        "This is the big export endpoint — the default cap is 50,000 rows, so raise "
+        "`limit` to pull the entire stored history (the full 10-year dataset is ~460,000 rows)."
     ),
     responses=_resp({
         "count": 2,
@@ -713,18 +713,46 @@ def get_history_all(
     return _gzip_big_response(request, f"history_all:{limit}", cache_stats()["loaded_at"], _produce)
 
 
+def _cache_window_start() -> date:
+    """Earliest date held by the in-memory cache (today minus the cache window)."""
+    return date.today() - timedelta(days=365 * CACHE_HISTORY_YEARS)
+
+
+def _range_from_cache(from_date: date, to_date: date):
+    """Serve a date range from the in-memory cache, or None if it isn't loaded.
+
+    Only callers that have already confirmed the range starts within the cached
+    window should use this.
+    """
+    cache = get_all()
+    if not cache:
+        return None
+    lo, hi = str(from_date), str(to_date)
+    data = []
+    for symbol, history in cache.items():
+        for bar in history:
+            if lo <= bar["date"] <= hi:
+                data.append({"symbol": symbol, **bar})
+    return {"count": len(data), "from": lo, "to": hi, "data": data}
+
+
 @router.get(
     "/history/range",
     summary="History between two dates (all assets)",
     description=(
         "Returns every stored daily bar **between two inclusive dates** for every asset, "
         "sorted by symbol then date. Both query parameters are required, format `YYYY-MM-DD`.\n\n"
+        "If `from` falls inside the in-memory cache window (the last `CACHE_HISTORY_YEARS` "
+        "years, default 1) the response is served straight from memory with no database "
+        "round-trip; otherwise (e.g. the initial 10-year load) it is served from the database. "
+        "The `source` field reports which path was used.\n\n"
         "Example: `?from=2024-01-01&to=2024-12-31` gives all assets for the 2024 calendar year."
     ),
     responses=_resp({
         "count": 2,
         "from": "2024-01-02",
         "to": "2024-01-03",
+        "source": "cache",
         "data": [
             {"symbol": "EURUSD=X", "date": "2024-01-02", "open": 1.0940, "high": 1.0960,
              "low": 1.0920, "close": 1.0950, "volume": 0},
@@ -741,7 +769,13 @@ def get_history_range(
 ):
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="'from' must be less than or equal to 'to'.")
+    within_cache = from_date >= _cache_window_start()
+
     def _produce():
+        if within_cache:
+            cached = _range_from_cache(from_date, to_date)
+            if cached is not None:
+                return {**cached, "source": "cache"}
         rows = db.execute(
             text(
                 "SELECT symbol, date, open, high, low, close, volume "
@@ -750,7 +784,9 @@ def get_history_range(
             {"from": from_date, "to": to_date},
         ).fetchall()
         data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
-        return {"count": len(data), "from": str(from_date), "to": str(to_date), "data": data}
+        return {"count": len(data), "from": str(from_date), "to": str(to_date),
+                "data": data, "source": "database"}
+
     return _gzip_big_response(request, f"history_range:{from_date}:{to_date}", cache_stats()["loaded_at"], _produce)
 
 

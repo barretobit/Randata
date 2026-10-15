@@ -104,15 +104,20 @@ def _info_is_meaningful(info):
 def _inception_from_info(info):
     """Extract an asset's first-trade date from a Yahoo `info` payload.
 
-    Yahoo exposes `firstTradeDateEpochUtc` (epoch seconds). Returns a `date` or
-    None when unavailable. This is only a hint — for fx/crypto/index the value
-    can be the data provider's start rather than a true listing date.
+    Yahoo exposes the first trade as epoch seconds (`firstTradeDateEpochUtc`) or
+    milliseconds (`firstTradeDateMilliseconds`), depending on the payload/version.
+    Returns a `date` or None when unavailable. This is only a hint — for
+    fx/crypto/index the value can be the data provider's start rather than a true
+    listing date.
     """
     if not isinstance(info, dict):
         return None
     epoch = info.get("firstTradeDateEpochUtc")
     if epoch is None:
-        return None
+        millis = info.get("firstTradeDateMilliseconds")
+        if millis is None:
+            return None
+        epoch = float(millis) / 1000.0
     try:
         return datetime.fromtimestamp(float(epoch), tz=timezone.utc).date()
     except (TypeError, ValueError, OSError, OverflowError):
