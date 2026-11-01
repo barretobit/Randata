@@ -27,6 +27,20 @@ BACKFILL_DELAY_SECONDS = float(os.getenv("BACKFILL_DELAY_SECONDS", "2.0"))
 BACKFILL_JITTER_SECONDS = float(os.getenv("BACKFILL_JITTER_SECONDS", "1.0"))
 INGEST_DELAY_SECONDS = float(os.getenv("INGEST_DELAY_SECONDS", "1.0"))
 INGEST_JITTER_SECONDS = float(os.getenv("INGEST_JITTER_SECONDS", "0.5"))
+# Re-fetch a small recent overlap to include delayed bars and provider corrections.
+INGEST_OVERLAP_DAYS = int(os.getenv("INGEST_OVERLAP_DAYS", "7"))
+# Avoid treating long exchange holidays as missing bars; crypto trades every day.
+INGEST_MARKET_GAP_DAYS = int(os.getenv("INGEST_MARKET_GAP_DAYS", "14"))
+# Spread full-history checks across this many daily runs.
+HISTORY_AUDIT_CYCLE_DAYS = int(os.getenv("HISTORY_AUDIT_CYCLE_DAYS", "30"))
+HISTORY_REPAIR_MAX_RANGES_PER_NIGHT = int(
+    os.getenv("HISTORY_REPAIR_MAX_RANGES_PER_NIGHT", "50")
+)
+# Robust outlier check settings for close-to-close returns.
+PRICE_OUTLIER_MIN_SAMPLES = int(os.getenv("PRICE_OUTLIER_MIN_SAMPLES", "20"))
+PRICE_OUTLIER_SIGMA = float(os.getenv("PRICE_OUTLIER_SIGMA", "8.0"))
+PRICE_OUTLIER_MIN_RETURN = float(os.getenv("PRICE_OUTLIER_MIN_RETURN", "0.02"))
+PRICE_HARD_MAX_RETURN = float(os.getenv("PRICE_HARD_MAX_RETURN", "0.8"))
 
 # Extra-gentle throttle used by the slow bulk backfill endpoint
 # (POST /finance/admin/backfill-missing). "Really slow" on purpose so a

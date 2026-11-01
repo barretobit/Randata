@@ -11,6 +11,7 @@
 --                   metal: {"display": "XAU", "unit": "USD per troy ounce"}
 --                   stock: {}
 --                   crypto:{"display": "BTC"}
+-- inception_date:   first-trade date reported by Yahoo Finance, when available
 --
 -- Run this once against the application database (the one referenced by
 -- DATABASE_URL), e.g.:
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS assets (
     name        VARCHAR(100)    NOT NULL,
     asset_type  VARCHAR(30)     NOT NULL,
     properties  JSON            NULL,
+    inception_date DATE         NULL,
     created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_assets_symbol (symbol),

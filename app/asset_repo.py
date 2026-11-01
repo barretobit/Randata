@@ -1,10 +1,12 @@
 """Database access for the tracked-assets catalogue (`assets` table)."""
 
 import json
+from datetime import timedelta
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from .config import INGEST_MARKET_GAP_DAYS
 from .db import SessionLocal
 from .logging_config import get_logger
 
@@ -95,6 +97,67 @@ def get_history_coverage(db=None):
         }
         for r in rows
     }
+
+
+def get_all_price_bars(db=None):
+    """Return stored OHLCV bars in chronological order for history audits."""
+    own = db is None
+    if own:
+        db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT symbol, date, open, high, low, close, volume "
+                "FROM daily_prices ORDER BY symbol, date"
+            )
+        ).fetchall()
+    finally:
+        _close(db, own)
+    return [
+        {
+            "symbol": row.symbol,
+            "date": row.date,
+            "open": row.open,
+            "high": row.high,
+            "low": row.low,
+            "close": row.close,
+            "volume": row.volume,
+        }
+        for row in rows
+    ]
+
+
+def get_history_gaps(db=None):
+    """Find long gaps between stored bars, allowing for weekends and holidays."""
+    own = db is None
+    if own:
+        db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT gaps.symbol, gaps.previous_date, gaps.next_date FROM ("
+                "  SELECT p.symbol, p.date AS previous_date, "
+                "         LEAD(p.date) OVER (PARTITION BY p.symbol ORDER BY p.date) AS next_date "
+                "  FROM daily_prices p"
+                ") gaps "
+                "LEFT JOIN assets a ON a.symbol = gaps.symbol "
+                "WHERE gaps.next_date IS NOT NULL "
+                "AND DATEDIFF(gaps.next_date, gaps.previous_date) > "
+                "    CASE WHEN a.asset_type = 'crypto' THEN 1 ELSE :gap_days END "
+                "ORDER BY gaps.symbol, gaps.previous_date"
+            ),
+            {"gap_days": INGEST_MARKET_GAP_DAYS},
+        ).fetchall()
+    finally:
+        _close(db, own)
+    return [
+        {
+            "symbol": row.symbol,
+            "start": row.previous_date + timedelta(days=1),
+            "end": row.next_date,
+        }
+        for row in rows
+    ]
 
 
 def add_asset(symbol, name, asset_type, properties=None, inception_date=None, db=None):

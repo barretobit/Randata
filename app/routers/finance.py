@@ -27,6 +27,8 @@ from ..ingestion import (
 
 router = APIRouter()
 
+HISTORY_RANGE_MAX_ROWS = 50000
+
 
 class AddAssetRequest(BaseModel):
     symbol: str
@@ -678,7 +680,8 @@ def get_crypto_history(
         "sorted by symbol then date (oldest first). Each entry contains the `symbol` plus "
         "`date, open, high, low, close, volume`.\n\n"
         "This is the big export endpoint — the default cap is 50,000 rows, so raise "
-        "`limit` to pull the entire stored history (the full 10-year dataset is ~460,000 rows)."
+        "`limit` to pull the entire stored history (the full 10-year dataset is ~460,000 rows). "
+        "The `from` and `to` fields report the earliest and latest dates in the returned rows."
     ),
     responses=_resp({
         "count": 2,
@@ -706,10 +709,9 @@ def get_history_all(
             {"limit": limit},
         ).fetchall()
         data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
-        first = data[0] if data else None
-        last = data[-1] if data else None
-        return {"count": len(data), "from": first["date"] if first else None,
-                "to": last["date"] if last else None, "data": data}
+        earliest = min((item["date"] for item in data), default=None)
+        latest = max((item["date"] for item in data), default=None)
+        return {"count": len(data), "from": earliest, "to": latest, "data": data}
     return _gzip_big_response(request, f"history_all:{limit}", cache_stats()["loaded_at"], _produce)
 
 
@@ -733,6 +735,11 @@ def _range_from_cache(from_date: date, to_date: date):
         for bar in history:
             if lo <= bar["date"] <= hi:
                 data.append({"symbol": symbol, **bar})
+                if len(data) > HISTORY_RANGE_MAX_ROWS:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Date range exceeds the {HISTORY_RANGE_MAX_ROWS:,}-row limit.",
+                    )
     return {"count": len(data), "from": lo, "to": hi, "data": data}
 
 
@@ -742,6 +749,8 @@ def _range_from_cache(from_date: date, to_date: date):
     description=(
         "Returns every stored daily bar **between two inclusive dates** for every asset, "
         "sorted by symbol then date. Both query parameters are required, format `YYYY-MM-DD`.\n\n"
+        f"Responses are limited to {HISTORY_RANGE_MAX_ROWS:,} rows. Requests matching more rows "
+        "return HTTP 413 instead of a partial result.\n\n"
         "If `from` falls inside the in-memory cache window (the last `CACHE_HISTORY_YEARS` "
         "years, default 1) the response is served straight from memory with no database "
         "round-trip; otherwise (e.g. the initial 10-year load) it is served from the database. "
@@ -779,10 +788,16 @@ def get_history_range(
         rows = db.execute(
             text(
                 "SELECT symbol, date, open, high, low, close, volume "
-                "FROM daily_prices WHERE date BETWEEN :from AND :to ORDER BY symbol, date ASC"
+                "FROM daily_prices WHERE date BETWEEN :from AND :to "
+                "ORDER BY symbol, date ASC LIMIT :limit"
             ),
-            {"from": from_date, "to": to_date},
+            {"from": from_date, "to": to_date, "limit": HISTORY_RANGE_MAX_ROWS + 1},
         ).fetchall()
+        if len(rows) > HISTORY_RANGE_MAX_ROWS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Date range exceeds the {HISTORY_RANGE_MAX_ROWS:,}-row limit.",
+            )
         data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
         return {"count": len(data), "from": str(from_date), "to": str(to_date),
                 "data": data, "source": "database"}
@@ -1492,9 +1507,12 @@ def get_logs(db: Session = Depends(get_db)):
     "/admin/ingest-daily",
     summary="Run daily ingestion now (admin)",
     description=(
-        "Triggers the daily fetch for all assets immediately — the same work the automatic "
-        "scheduler does at 23:00 UTC on weekdays. Protected by the `X-Admin-Key` header (send the "
-        "value of the `ADMIN_KEY` environment variable).\n\n"
+        "Checks stored history for every tracked asset, repairs detected gaps, and fetches an "
+        "overlapping recent date range to capture delayed bars or corrections. Assets are "
+        "periodically assigned a full-history audit. Suspicious or structurally invalid bars "
+        "are skipped and logged. This is the same work the automatic scheduler does daily at "
+        "23:00 UTC. Protected by the `X-Admin-Key` header (send the value of the "
+        "`ADMIN_KEY` environment variable).\n\n"
         "Returns the number of rows written per asset plus the latest stored value for each."
     ),
     responses=_resp({

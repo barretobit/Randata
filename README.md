@@ -107,7 +107,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/crypto/{symbol}`          | Latest price for one crypto (e.g. `BTC-USD`)                      |
 | GET    | `/finance/crypto/{symbol}/history`  | Full-window daily history for one crypto                               |
 | GET    | `/finance/history/all`              | Full dump, every stored bar, all assets (default cap 50,000 rows) |
-| GET    | `/finance/history/range?from&to`    | Every bar between two dates, all assets (served from cache when `from` is within the cache window, else DB) |
+| GET    | `/finance/history/range?from&to`    | Up to 50,000 bars between two dates, all assets (HTTP 413 if exceeded; served from cache when `from` is within the cache window, else DB) |
 | GET    | `/finance/symbol/{symbol}`          | Latest bar for any stored symbol (incl. ad-hoc additions)         |
 | GET    | `/finance/symbol/{symbol}/history`  | Full history for any stored symbol                                |
 | GET    | `/finance/assets`                   | Full catalogue of tracked assets, grouped by type                 |
@@ -120,6 +120,8 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/cache/etfs`               | All ETF histories from the cache (no DB hit)                      |
 | GET    | `/finance/cache/cryptos`            | All crypto histories from the cache (no DB hit)                   |
 | GET    | `/finance/cache/{symbol}`           | One symbol's history from the cache                               |
+
+For an existing database, run `sql/migrate_finance_schema.sql` once to add the `assets.inception_date` column and the daily-price date index. New databases get both from the create-table scripts.
 
 ## Admin endpoints (require `X-Admin-Key` when `ADMIN_KEY` is set)
 
@@ -141,15 +143,17 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 
 Admin endpoints require the `X-Admin-Key` header when `ADMIN_KEY` is set in the environment.
 
-The scheduler runs the daily fetch automatically on weekdays at:
+The scheduler runs the daily incremental ingestion automatically every day at:
 
-| Timezone           | Local time (weekdays)                             |
+| Timezone           | Local time                                        |
 | ------------------ | ------------------------------------------------- |
-| UTC                | 23:00                                             |
+| UTC                | 23:00 daily                                       |
 | London (GMT/BST)   | 23:00 (winter) / 00:00 next day (summer)          |
 | Zürich (CET/CEST)  | 00:00 next day (winter) / 01:00 next day (summer) |
 | New York (EST/EDT) | 18:00 (winter) / 19:00 (summer)                   |
 | Tokyo (JST)        | 08:00 next day (no DST)                           |
+
+Each nightly run fills assets missing their expected history, scans stored dates for long gaps, repairs detected gaps using Yahoo Finance's returned trading dates, and fetches an overlapping recent window to capture late bars and corrections. `INGEST_OVERLAP_DAYS` controls the recent overlap (default 7). The gap scan tolerates up to `INGEST_MARKET_GAP_DAYS` calendar days (default 14) for market assets and treats any missing day as a gap for crypto, which trades daily. A deterministic rotation gives each tracked asset a full configured-history audit about once every `HISTORY_AUDIT_CYCLE_DAYS` (default 30 days), spreading provider requests across nights. The final nightly check scans all stored bars for malformed OHLC values and abnormal close-to-close moves. It re-fetches suspicious dates with surrounding Yahoo history and replaces stored data only when the returned bar and adjacent price sequence pass validation; unresolved cases remain unchanged and are logged for review. During ingestion, invalid OHLC bars and price moves over the absolute `PRICE_HARD_MAX_RETURN` limit (default 80%) are skipped. Smaller moves are compared with the asset's recent returns after at least `PRICE_OUTLIER_MIN_SAMPLES` observations (default 20); moves beyond the larger of `PRICE_OUTLIER_SIGMA` robust standard deviations (default 8) or the minimum return floor (default 2%) are also skipped and logged.
 
 ## In-memory cache
 

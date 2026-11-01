@@ -92,10 +92,10 @@ def _scheduled_ingest():
 if SessionLocal is not None:
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
-        _scheduled_ingest, "cron", day_of_week="mon-fri", hour=23, minute=0
+        _scheduled_ingest, "cron", hour=23, minute=0
     )
     scheduler.start()
-    logger.info("Daily ingestion scheduler started (Mon-Fri 23:00 UTC).")
+    logger.info("Daily ingestion scheduler started (daily at 23:00 UTC).")
     atexit.register(lambda: scheduler.shutdown(wait=False))
 else:
     logger.warning("DATABASE_URL not set — scheduler disabled.")

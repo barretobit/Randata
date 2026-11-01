@@ -20,5 +20,6 @@ CREATE TABLE IF NOT EXISTS daily_prices (
     close   DECIMAL(18,6) DEFAULT NULL,
     volume  BIGINT        DEFAULT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uq_symbol_date (symbol, date)
+    UNIQUE KEY uq_symbol_date (symbol, date),
+    KEY idx_daily_prices_date (date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
