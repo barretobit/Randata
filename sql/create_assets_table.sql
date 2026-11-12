@@ -4,12 +4,13 @@
 -- source of truth for the public catalogue — assets are added via the admin
 -- API (POST /finance/admin/assets).
 --
--- asset_type values: 'fx' | 'index' | 'metal' | 'stock' | 'crypto'
+-- asset_type values: 'fx' | 'index' | 'metal' | 'stock' | 'etf' | 'crypto'
 -- properties:       JSON object with category-specific metadata, e.g.
 --                   FX:    {"display": "EUR/USD"}
 --                   index: {"region": "US"}
 --                   metal: {"display": "XAU", "unit": "USD per troy ounce"}
 --                   stock: {}
+--                   etf:   {}
 --                   crypto:{"display": "BTC"}
 -- inception_date:   first-trade date reported by Yahoo Finance, when available
 --

@@ -9,93 +9,82 @@ Serves data without hitting the database on read-heavy public endpoints.
 import threading
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import text
-
-from .asset_repo import price_bar_to_dict
+from . import price_repository
 from .config import CACHE_HISTORY_YEARS
-from .db import SessionLocal
 from .logging_config import get_logger
 
 logger = get_logger("cache")
 
+# Measured footprint of one cached bar (a dict with a date string, 4 floats and an int).
+_ESTIMATED_BYTES_PER_ROW = 470
+_CACHE_HISTORY_DAYS = 365 * CACHE_HISTORY_YEARS
+
 _lock = threading.Lock()
 _cache: dict[str, list[dict]] = {}
 _loaded_at: datetime | None = None
-_CACHE_HISTORY_DAYS = 365 * CACHE_HISTORY_YEARS
+
+
+def window_start() -> date:
+    """Earliest date held by the cache (today minus the cache window)."""
+    return date.today() - timedelta(days=_CACHE_HISTORY_DAYS)
 
 
 def load() -> bool:
     """Load the configured rolling window of historical data from the database into memory."""
     global _loaded_at
-    if SessionLocal is None:
-        logger.warning("No database connection — cache not loaded.")
-        return False
-    db = None
     try:
-        db = SessionLocal()
-        rows = db.execute(
-            text(
-                "SELECT symbol, date, open, high, low, close, volume "
-                "FROM daily_prices WHERE date >= :start_date "
-                "ORDER BY symbol, date ASC"
-            ),
-            {"start_date": date.today() - timedelta(days=_CACHE_HISTORY_DAYS)},
-        ).fetchall()
-        new_cache: dict[str, list[dict]] = {}
-        for row in rows:
-            new_cache.setdefault(row.symbol, []).append(price_bar_to_dict(row))
-        with _lock:
-            _cache.clear()
-            _cache.update(new_cache)
-            _loaded_at = datetime.now(timezone.utc)
-        total_rows = sum(len(history) for history in new_cache.values())
-        logger.info(
-            "Cache loaded: %d symbols, %d rows, refreshed at %s",
-            len(new_cache), total_rows, _loaded_at.isoformat(),
-        )
-        return True
+        rows = price_repository.get_bars_since(window_start())
     except Exception as error:
         logger.error("Failed to load cache: %s", error)
         return False
-    finally:
-        if db is not None:
-            db.close()
+    new_cache: dict[str, list[dict]] = {}
+    for row in rows:
+        new_cache.setdefault(row.symbol, []).append(price_repository.price_bar_to_dict(row))
+    with _lock:
+        _cache.clear()
+        _cache.update(new_cache)
+        _loaded_at = datetime.now(timezone.utc)
+    total_rows = sum(len(history) for history in new_cache.values())
+    logger.info(
+        "Cache loaded: %d symbols, %d rows, refreshed at %s",
+        len(new_cache), total_rows, _loaded_at.isoformat(),
+    )
+    return True
 
 
 def get_symbol(symbol: str) -> list[dict] | None:
-    """Return cached history for a symbol, or None if not in cache."""
+    """Cached history for one symbol, or None if it is not in the cache."""
     with _lock:
         return _cache.get(symbol)
 
 
 def get_all() -> dict[str, list[dict]]:
-    """Return the entire cache (shallow copy of keys)."""
+    """The entire cache (a shallow copy, safe to iterate while a reload happens)."""
     with _lock:
         return dict(_cache)
 
 
-def stats() -> dict:
-    """Return cache metadata for diagnostics."""
+def loaded_at() -> str | None:
+    """When the cache was last loaded (ISO 8601), or None if it never was."""
     with _lock:
-        symbols = list(_cache.keys())
-        total_rows = sum(len(v) for v in _cache.values())
+        return _loaded_at.isoformat() if _loaded_at else None
+
+
+def stats() -> dict:
+    """Cache metadata for diagnostics."""
+    with _lock:
         return {
-            "symbols":    len(symbols),
-            "total_rows": total_rows,
+            "symbols":    len(_cache),
+            "total_rows": sum(len(history) for history in _cache.values()),
             "loaded_at":  _loaded_at.isoformat() if _loaded_at else None,
         }
 
 
 def details() -> dict:
-    """Return a detailed cache report: per-symbol coverage and memory estimate.
-
-    Estimated size is a rough memory footprint of the Python dict/list structure,
-    useful for monitoring whether the cache is healthy or unexpectedly large.
-    """
+    """Detailed cache report: per-symbol coverage and an estimated memory footprint."""
     with _lock:
         per_symbol = []
         total_rows = 0
-        total_bytes = 0
         for symbol, history in sorted(_cache.items()):
             rows = len(history)
             total_rows += rows
@@ -105,12 +94,10 @@ def details() -> dict:
                 "first_date": history[0]["date"] if rows else None,
                 "last_date":  history[-1]["date"] if rows else None,
             })
-            # rough Python overhead: dict + strings + floats
-            total_bytes += rows * 450
         return {
             "loaded_at":  _loaded_at.isoformat() if _loaded_at else None,
             "symbols":    len(per_symbol),
             "total_rows": total_rows,
-            "est_memory_mb": round(total_bytes / (1024 * 1024), 2),
+            "est_memory_mb": round(total_rows * _ESTIMATED_BYTES_PER_ROW / (1024 * 1024), 2),
             "per_symbol": per_symbol,
         }

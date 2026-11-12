@@ -92,11 +92,11 @@ def frame_dates(frame):
 
 @pytest.fixture
 def fake_session(monkeypatch):
-    """One shared FakeSession for every SessionLocal() call in ingestion; api_logs writes are dropped."""
-    from app import ingestion
+    """One shared FakeSession for every database session; api_logs writes are dropped."""
+    from app import db, ingestion
 
     session = FakeSession()
-    monkeypatch.setattr(ingestion, "SessionLocal", lambda: session)
+    monkeypatch.setattr(db, "SessionLocal", lambda: session)
     monkeypatch.setattr(ingestion, "log_event", lambda *arguments, **keywords: None)
     return session
 

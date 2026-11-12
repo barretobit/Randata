@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
-from app import ingestion
+from app import ingestion, yahoo
+from app.price_validation import find_suspicious_bars
 from conftest import frame_dates, make_frame, price_row, random_walk
 
 
@@ -103,7 +104,7 @@ def test_ingest_daily_refetches_full_window_after_split(fake_session, monkeypatc
         [(days[3],)],  # MAX(date)
         [price_row(day, close * 2) for day, close in zip(days, [50, 50.5, 51, 51.5])],
     ]
-    monkeypatch.setattr(ingestion, "_download", lambda *arguments, **keywords: frame)
+    monkeypatch.setattr(yahoo, "download", lambda *arguments, **keywords: frame)
     backfilled = []
     monkeypatch.setattr(ingestion, "backfill", lambda symbol, **keywords: backfilled.append(symbol) or 2500)
 
@@ -124,7 +125,7 @@ def test_audit_flags_spikes_and_invalid_bars_but_not_crashes():
     ]
     bars[30]["high"] = None
 
-    assert ingestion._find_suspicious_bars(bars) == [bars[30]["date"], bars[100]["date"]]
+    assert find_suspicious_bars(bars) == [bars[30]["date"], bars[100]["date"]]
 
 
 def test_only_one_bulk_job_runs_at_a_time():

@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -13,10 +15,26 @@ if DATABASE_URL:
 
 
 def get_db():
+    """FastAPI dependency: one database session per request."""
     if SessionLocal is None:
         raise HTTPException(status_code=500, detail="DATABASE_URL is not configured.")
-    db = SessionLocal()
+    session = SessionLocal()
     try:
-        yield db
+        yield session
     finally:
-        db.close()
+        session.close()
+
+
+@contextmanager
+def session_scope(session=None):
+    """Use the caller's session when one is given, otherwise open and close a new one."""
+    if session is not None:
+        yield session
+        return
+    if SessionLocal is None:
+        raise RuntimeError("DATABASE_URL is not configured.")
+    new_session = SessionLocal()
+    try:
+        yield new_session
+    finally:
+        new_session.close()

@@ -48,8 +48,19 @@ PRICE_HARD_MAX_RETURN = float(os.getenv("PRICE_HARD_MAX_RETURN", "0.8"))
 SLOW_BACKFILL_DELAY_SECONDS = float(os.getenv("SLOW_BACKFILL_DELAY_SECONDS", "12.0"))
 SLOW_BACKFILL_JITTER_SECONDS = float(os.getenv("SLOW_BACKFILL_JITTER_SECONDS", "4.0"))
 
+
+def _renamed_setting(name: str, old_name: str, default: str) -> str:
+    """Read a setting by its new name, falling back to the name it had before."""
+    return os.getenv(name) or os.getenv(old_name) or default
+
+
 # Retry policy for rate-limit responses during a single symbol fetch.
-YF_MAX_RETRIES = int(os.getenv("YF_MAX_RETRIES", "5"))
-YF_RETRY_BASE_SECONDS = float(os.getenv("YF_RETRY_BASE_SECONDS", "4.0"))
+# The YF_* names are still read so existing deployments keep their values.
+YAHOO_MAX_RETRIES = int(_renamed_setting("YAHOO_MAX_RETRIES", "YF_MAX_RETRIES", "5"))
+YAHOO_RETRY_BASE_SECONDS = float(
+    _renamed_setting("YAHOO_RETRY_BASE_SECONDS", "YF_RETRY_BASE_SECONDS", "4.0")
+)
 # Backoff base used by the slow mode (waits even longer between retries).
-SLOW_YF_RETRY_BASE_SECONDS = float(os.getenv("SLOW_YF_RETRY_BASE_SECONDS", "10.0"))
+SLOW_YAHOO_RETRY_BASE_SECONDS = float(
+    _renamed_setting("SLOW_YAHOO_RETRY_BASE_SECONDS", "SLOW_YF_RETRY_BASE_SECONDS", "10.0")
+)

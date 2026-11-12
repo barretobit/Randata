@@ -4,10 +4,10 @@ from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 
-from app import cache, ingestion
+from app import cache, db, ingestion
 from app.db import get_db
 from app.main import app
-from app.routers import finance
+from app.routers.finance import history_endpoints, security
 from conftest import ADMIN_HEADERS, FakeSession, price_row
 
 
@@ -46,7 +46,7 @@ def test_admin_endpoints_accept_right_key(client):
 
 
 def test_admin_endpoints_are_disabled_without_configured_key(client, monkeypatch):
-    monkeypatch.setattr(finance, "ADMIN_KEY", None)
+    monkeypatch.setattr(security, "ADMIN_KEY", None)
     assert client.get("/finance/admin/cache/details", headers=ADMIN_HEADERS).status_code == 503
 
 
@@ -75,8 +75,8 @@ def test_history_all_streams_every_row(client, monkeypatch):
         for day in range(1, 6)
     ]
     session = FakeSession(reads=[rows])
-    monkeypatch.setattr(finance, "SessionLocal", lambda: session)
-    monkeypatch.setattr(finance, "_STREAM_CHUNK_ROWS", 3)  # force several chunks
+    monkeypatch.setattr(db, "SessionLocal", lambda: session)
+    monkeypatch.setattr(history_endpoints, "_STREAM_CHUNK_ROWS", 3)  # force several chunks
 
     response = client.get("/finance/history/all?limit=100")
 
@@ -92,6 +92,6 @@ def test_history_all_streams_every_row(client, monkeypatch):
 
 
 def test_history_all_with_no_rows_is_valid_json(client, monkeypatch):
-    monkeypatch.setattr(finance, "SessionLocal", lambda: FakeSession(reads=[[]]))
+    monkeypatch.setattr(db, "SessionLocal", lambda: FakeSession(reads=[[]]))
     body = client.get("/finance/history/all").json()
     assert body == {"data": [], "count": 0, "from": None, "to": None}

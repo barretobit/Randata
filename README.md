@@ -90,7 +90,8 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | ------ | ----------------------------------- | ----------------------------------------------------------------- |
 | GET    | `/finance/fx/rates`                 | Latest price for all FX pairs                                     |
 | GET    | `/finance/fx/rates/{pair}`          | Latest price for one pair (e.g. `EURUSD`)                         |
-| GET    | `/finance/fx/history/{pair}`        | Full-window daily history for one pair                                 |
+| GET    | `/finance/fx/rates/{pair}/history`  | Full-window daily history for one pair                            |
+| GET    | `/finance/fx/history/{pair}`        | Same as above (deprecated path, still served)                     |
 | GET    | `/finance/indexes`                  | Latest value for all indexes                                      |
 | GET    | `/finance/indexes/{symbol}`         | Latest value for one index (e.g. `^GSPC`, `^N225`)                |
 | GET    | `/finance/indexes/{symbol}/history` | Full-window daily history for one index                                |
@@ -132,7 +133,7 @@ For an existing database, run `sql/migrate_finance_schema.sql` once to add the `
 | POST   | `/finance/admin/assets`                   | Add an asset to the tracked catalogue (name/type auto-inferred from Yahoo)                 |
 | POST   | `/finance/admin/assets/onboard`           | One-call onboarding: verify symbol → add asset → full backfill → refresh cache (~1 min)    |
 | POST   | `/finance/admin/assets/{symbol}/backfill` | **Fast** full-window backfill for one tracked asset                                        |
-| GET    | `/finance/admin/backfill-symbol`          | **Fast** full-window backfill for one arbitrary Yahoo symbol                               |
+| POST   | `/finance/admin/backfill-symbol?symbol=`  | **Fast** full-window backfill for one arbitrary Yahoo symbol (`GET` still works, deprecated) |
 | POST   | `/finance/admin/assets/backfill-inception-dates` | **Slow** capture missing `inception_date`s so young assets are not re-fetched       |
 | POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing their expected history (gentle pacing)          |
 | POST   | `/finance/admin/backfill`                 | **Medium** backfill of ALL assets (throttled ~2s between symbols)                          |
@@ -185,6 +186,28 @@ Because JSON is highly repetitive, this reduces payload sizes by roughly **75-80
 | `/finance/cache/{symbol}` | ~130 KB      | ~30 KB            |
 
 This is especially relevant on Render's free tier, which caps outbound HTTP bandwidth at **5 GB/month**, per-symbol or per-asset-class calls use ~100× less bandwidth than the full dump.
+
+## Configuration
+
+Settings are environment variables (a local `.env` file is read too); see [app/config.py](app/config.py) for every one and its default. The Yahoo retry settings were renamed: `YAHOO_MAX_RETRIES`, `YAHOO_RETRY_BASE_SECONDS` and `SLOW_YAHOO_RETRY_BASE_SECONDS`. The old `YF_*` names are still read when the new ones are not set.
+
+Yahoo errors (network failures, unknown symbols, failed price adjustment) are raised and logged to `api_logs` as `ERROR`. Only "Yahoo has no prices for this range" counts as an empty result.
+
+## Code layout
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `app/main.py` | FastAPI app, middleware, startup (catalogue + cache load) and the nightly scheduler |
+| `app/config.py` | Environment settings |
+| `app/db.py` | Database engine and sessions |
+| `app/asset_repository.py` | SQL for the `assets` table |
+| `app/price_repository.py` | SQL for the `daily_prices` table |
+| `app/yahoo.py` | Yahoo Finance client: downloads with retries, symbol checks, inception dates |
+| `app/price_validation.py` | Bar checks: OHLC structure and isolated price spikes |
+| `app/ingestion.py` | Jobs: backfills, nightly update, history audit and repair |
+| `app/cache.py`, `app/catalog.py` | In-memory price cache and asset catalogue |
+| `app/logging_config.py` | Console logging and the `api_logs` table |
+| `app/routers/finance/` | Endpoints: `market_endpoints`, `history_endpoints`, `cache_endpoints`, `admin_endpoints`; OpenAPI examples in `examples.py` |
 
 ## Tests
 
