@@ -50,8 +50,8 @@ def log_event(
 ) -> None:
     """Persist one structured event into the `api_logs` table.
 
-    Never raises: if the database is not available (or SOCKS unconfigured),
-    the event is dropped gracefully so logging never breaks the app.
+    Never raises: if the database is not available, the event is dropped
+    gracefully so logging never breaks the app.
     """
     if SessionLocal is None:
         return
@@ -79,9 +79,9 @@ def log_event(
             },
         )
         db.commit()
-    except Exception as e:  # pragma: no cover - logging must never crash the app
+    except Exception as error:  # pragma: no cover - logging must never crash the app
         logging.getLogger("randata").warning(
-            "Failed to write API log event to database: %s", e
+            "Failed to write API log event to database: %s", error
         )
     finally:
         if db is not None:

@@ -1,8 +1,9 @@
 """In-memory cache for historical price data.
 
 Loads the configured rolling window (CACHE_HISTORY_YEARS) of daily_prices rows
-on startup and refreshes after each ingestion. Serves data without hitting the
-database on read-heavy public endpoints.
+on startup and reloads after each ingestion. A reload builds the new data first
+and swaps it in one step, so readers never see an empty or half-built cache.
+Serves data without hitting the database on read-heavy public endpoints.
 """
 
 import threading
@@ -10,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
+from .asset_repo import price_bar_to_dict
 from .config import CACHE_HISTORY_YEARS
 from .db import SessionLocal
 from .logging_config import get_logger
@@ -20,17 +22,6 @@ _lock = threading.Lock()
 _cache: dict[str, list[dict]] = {}
 _loaded_at: datetime | None = None
 _CACHE_HISTORY_DAYS = 365 * CACHE_HISTORY_YEARS
-
-
-def _row_to_dict(row) -> dict:
-    return {
-        "date":   str(row.date),
-        "open":   row.open,
-        "high":   row.high,
-        "low":    row.low,
-        "close":  row.close,
-        "volume": row.volume,
-    }
 
 
 def load() -> bool:
@@ -51,42 +42,24 @@ def load() -> bool:
             {"start_date": date.today() - timedelta(days=_CACHE_HISTORY_DAYS)},
         ).fetchall()
         new_cache: dict[str, list[dict]] = {}
-        for r in rows:
-            new_cache.setdefault(r.symbol, []).append(_row_to_dict(r))
+        for row in rows:
+            new_cache.setdefault(row.symbol, []).append(price_bar_to_dict(row))
         with _lock:
             _cache.clear()
             _cache.update(new_cache)
             _loaded_at = datetime.now(timezone.utc)
-        total_rows = sum(len(v) for v in new_cache.values())
+        total_rows = sum(len(history) for history in new_cache.values())
         logger.info(
             "Cache loaded: %d symbols, %d rows, refreshed at %s",
             len(new_cache), total_rows, _loaded_at.isoformat(),
         )
         return True
-    except Exception as e:
-        logger.error("Failed to load cache: %s", e)
+    except Exception as error:
+        logger.error("Failed to load cache: %s", error)
         return False
     finally:
         if db is not None:
             db.close()
-
-
-def refresh() -> bool:
-    """Alias for load(). Call after ingestion to update the cache."""
-    return load()
-
-
-def invalidate() -> None:
-    """Discard the entire cache so no stale data is served.
-
-    Call at the start of a fetch cycle: the cache is emptied immediately and
-    rebuilt from the database once the fetch has finished.
-    """
-    global _loaded_at
-    with _lock:
-        _cache.clear()
-        _loaded_at = None
-    logger.info("Cache invalidated — awaiting rebuild after fetch cycle.")
 
 
 def get_symbol(symbol: str) -> list[dict] | None:
@@ -123,11 +96,11 @@ def details() -> dict:
         per_symbol = []
         total_rows = 0
         total_bytes = 0
-        for sym, history in sorted(_cache.items()):
+        for symbol, history in sorted(_cache.items()):
             rows = len(history)
             total_rows += rows
             per_symbol.append({
-                "symbol":     sym,
+                "symbol":     symbol,
                 "rows":       rows,
                 "first_date": history[0]["date"] if rows else None,
                 "last_date":  history[-1]["date"] if rows else None,

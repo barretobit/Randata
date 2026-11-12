@@ -1,22 +1,24 @@
 import gzip
+import hmac
 import json
 import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Security
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .. import catalog
-from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets
-from ..cache import details as cache_details, get_all, get_symbol, invalidate as invalidate_cache, refresh as refresh_cache, stats as cache_stats
+from .. import cache, catalog
+from ..asset_repo import add_asset, asset_exists, get_all_assets as get_tracked_assets, price_bar_to_dict
 from ..config import ADMIN_KEY, CACHE_HISTORY_YEARS, SLOW_YF_RETRY_BASE_SECONDS
-from ..db import engine, get_db
+from ..db import SessionLocal, get_db
 from ..ingestion import (
+    IngestionAlreadyRunning,
     backfill,
     backfill_all,
     backfill_inception_dates,
@@ -58,8 +60,8 @@ def _latest(symbol: str, db: Session):
 def _latest_many(symbols: list, db: Session) -> dict:
     if not symbols:
         return {}
-    placeholders = ", ".join(f":s{i}" for i in range(len(symbols)))
-    params = {f"s{i}": s for i, s in enumerate(symbols)}
+    placeholders = ", ".join(f":symbol{index}" for index in range(len(symbols)))
+    params = {f"symbol{index}": symbol for index, symbol in enumerate(symbols)}
     rows = db.execute(
         text(
             "SELECT p.symbol, p.date, p.open, p.high, p.low, p.close, p.volume "
@@ -70,7 +72,7 @@ def _latest_many(symbols: list, db: Session) -> dict:
         ),
         params,
     ).fetchall()
-    return {r.symbol: r for r in rows}
+    return {row.symbol: row for row in rows}
 
 
 def _history(symbol: str, db: Session, limit: int = None):
@@ -83,19 +85,6 @@ def _history(symbol: str, db: Session, limit: int = None):
         sql += " LIMIT :limit"
         params["limit"] = int(limit)
     return db.execute(text(sql), params).fetchall()
-
-
-def _row_to_dict(row):
-    if row is None:
-        return None
-    return {
-        "date":   str(row.date),
-        "open":   row.open,
-        "high":   row.high,
-        "low":    row.low,
-        "close":  row.close,
-        "volume": row.volume,
-    }
 
 
 _GZIP_RESP_CACHE: dict = {}
@@ -128,9 +117,28 @@ def _gzip_big_response(request: Request, key: str, freshness, producer) -> Respo
     )
 
 
-def require_admin(request: Request):
-    if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
+_admin_key_header = APIKeyHeader(name="X-Admin-Key", scheme_name="X-Admin-Key", auto_error=False)
+
+
+def require_admin(admin_key: Optional[str] = Security(_admin_key_header)):
+    """Allow the request only with the right X-Admin-Key header.
+
+    Fails closed: when ADMIN_KEY is not configured, every admin endpoint is disabled.
+    """
+    if not ADMIN_KEY:
+        raise HTTPException(
+            status_code=503, detail="Admin endpoints are disabled: ADMIN_KEY is not configured."
+        )
+    if admin_key is None or not hmac.compare_digest(admin_key.encode("utf-8"), ADMIN_KEY.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Invalid admin key.")
+
+
+def _run_bulk_job(job):
+    """Run a bulk ingestion job, answering 409 while another one is still running."""
+    try:
+        return job()
+    except IngestionAlreadyRunning as error:
+        raise HTTPException(status_code=409, detail=str(error))
 
 
 @router.get(
@@ -148,14 +156,14 @@ def require_admin(request: Request):
 )
 def get_all_fx_rates(db: Session = Depends(get_db)):
     pairs = catalog.get_group("fx")
-    latest = _latest_many([p["symbol"] for p in pairs], db)
+    latest = _latest_many([pair["symbol"] for pair in pairs], db)
     result = []
     for pair in pairs:
         result.append({
             "symbol":  pair["symbol"],
             "display": pair.get("display", pair["symbol"]),
             "name":    pair["name"],
-            "latest":  _row_to_dict(latest.get(pair["symbol"])),
+            "latest":  price_bar_to_dict(latest.get(pair["symbol"])),
         })
     return result
 
@@ -188,7 +196,7 @@ def get_fx_rate(
         "symbol":  symbol,
         "display": meta.get("display", symbol),
         "name":    meta["name"],
-        "latest":  _row_to_dict(row),
+        "latest":  price_bar_to_dict(row),
     }
 
 
@@ -224,7 +232,7 @@ def get_fx_history(
         "display": meta.get("display", symbol),
         "name":    meta["name"],
         "count":   len(rows),
-        "history": [_row_to_dict(r) for r in rows],
+        "history": [price_bar_to_dict(row) for row in rows],
     }
 
 
@@ -243,14 +251,14 @@ def get_fx_history(
 )
 def get_all_indexes(db: Session = Depends(get_db)):
     indexes = catalog.get_group("index")
-    latest = _latest_many([i["symbol"] for i in indexes], db)
+    latest = _latest_many([index["symbol"] for index in indexes], db)
     result = []
-    for idx in indexes:
+    for index in indexes:
         result.append({
-            "symbol": idx["symbol"],
-            "name":   idx["name"],
-            "region": idx.get("region"),
-            "latest": _row_to_dict(latest.get(idx["symbol"])),
+            "symbol": index["symbol"],
+            "name":   index["name"],
+            "region": index.get("region"),
+            "latest": price_bar_to_dict(latest.get(index["symbol"])),
         })
     return result
 
@@ -283,7 +291,7 @@ def get_index(
         "symbol": full_symbol,
         "name":   meta["name"],
         "region": meta.get("region"),
-        "latest": _row_to_dict(row),
+        "latest": price_bar_to_dict(row),
     }
 
 
@@ -319,7 +327,7 @@ def get_index_history(
         "name":    meta["name"],
         "region":  meta.get("region"),
         "count":   len(rows),
-        "history": [_row_to_dict(r) for r in rows],
+        "history": [price_bar_to_dict(row) for row in rows],
     }
 
 
@@ -338,7 +346,7 @@ def get_index_history(
 )
 def get_all_metals(db: Session = Depends(get_db)):
     metals = catalog.get_group("metal")
-    latest = _latest_many([m["symbol"] for m in metals], db)
+    latest = _latest_many([metal["symbol"] for metal in metals], db)
     result = []
     for metal in metals:
         result.append({
@@ -346,7 +354,7 @@ def get_all_metals(db: Session = Depends(get_db)):
             "display": metal.get("display", metal["symbol"]),
             "name":    metal["name"],
             "unit":    metal.get("unit"),
-            "latest":  _row_to_dict(latest.get(metal["symbol"])),
+            "latest":  price_bar_to_dict(latest.get(metal["symbol"])),
         })
     return result
 
@@ -380,7 +388,7 @@ def get_metal(
         "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
         "unit":    asset.get("unit"),
-        "latest":  _row_to_dict(row),
+        "latest":  price_bar_to_dict(row),
     }
 
 
@@ -417,7 +425,7 @@ def get_metal_history(
         "name":    asset["name"],
         "unit":    asset.get("unit"),
         "count":   len(rows),
-        "history": [_row_to_dict(r) for r in rows],
+        "history": [price_bar_to_dict(row) for row in rows],
     }
 
 
@@ -436,13 +444,13 @@ def get_metal_history(
 )
 def get_all_stocks(db: Session = Depends(get_db)):
     stocks = catalog.get_group("stock")
-    latest = _latest_many([s["symbol"] for s in stocks], db)
+    latest = _latest_many([stock["symbol"] for stock in stocks], db)
     result = []
     for stock in stocks:
         result.append({
             "symbol": stock["symbol"],
             "name":   stock["name"],
-            "latest": _row_to_dict(latest.get(stock["symbol"])),
+            "latest": price_bar_to_dict(latest.get(stock["symbol"])),
         })
     return result
 
@@ -469,7 +477,7 @@ def get_stock(
     return {
         "symbol": asset["symbol"],
         "name":   asset["name"],
-        "latest": _row_to_dict(row),
+        "latest": price_bar_to_dict(row),
     }
 
 
@@ -499,7 +507,7 @@ def get_stock_history(
         "symbol": asset["symbol"],
         "name":   asset["name"],
         "count":  len(rows),
-        "history": [_row_to_dict(r) for r in rows],
+        "history": [price_bar_to_dict(row) for row in rows],
     }
 
 
@@ -518,13 +526,13 @@ def get_stock_history(
 )
 def get_all_etfs(db: Session = Depends(get_db)):
     etfs = catalog.get_group("etf")
-    latest = _latest_many([e["symbol"] for e in etfs], db)
+    latest = _latest_many([etf["symbol"] for etf in etfs], db)
     result = []
     for etf in etfs:
         result.append({
             "symbol": etf["symbol"],
             "name":   etf["name"],
-            "latest": _row_to_dict(latest.get(etf["symbol"])),
+            "latest": price_bar_to_dict(latest.get(etf["symbol"])),
         })
     return result
 
@@ -551,7 +559,7 @@ def get_etf(
     return {
         "symbol": asset["symbol"],
         "name":   asset["name"],
-        "latest": _row_to_dict(row),
+        "latest": price_bar_to_dict(row),
     }
 
 
@@ -581,7 +589,7 @@ def get_etf_history(
         "symbol": asset["symbol"],
         "name":   asset["name"],
         "count":  len(rows),
-        "history": [_row_to_dict(r) for r in rows],
+        "history": [price_bar_to_dict(row) for row in rows],
     }
 
 
@@ -607,7 +615,7 @@ def get_all_crypto(db: Session = Depends(get_db)):
             "symbol":  coin["symbol"],
             "display": coin.get("display", coin["symbol"]),
             "name":    coin["name"],
-            "latest":  _row_to_dict(latest.get(coin["symbol"])),
+            "latest":  price_bar_to_dict(latest.get(coin["symbol"])),
         })
     return result
 
@@ -636,7 +644,7 @@ def get_crypto(
         "symbol":  asset["symbol"],
         "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
-        "latest":  _row_to_dict(row),
+        "latest":  price_bar_to_dict(row),
     }
 
 
@@ -668,7 +676,7 @@ def get_crypto_history(
         "display": asset.get("display", asset["symbol"]),
         "name":    asset["name"],
         "count":   len(rows),
-        "history": [_row_to_dict(r) for r in rows],
+        "history": [price_bar_to_dict(row) for row in rows],
     }
 
 
@@ -681,38 +689,67 @@ def get_crypto_history(
         "`date, open, high, low, close, volume`.\n\n"
         "This is the big export endpoint — the default cap is 50,000 rows, so raise "
         "`limit` to pull the entire stored history (the full 10-year dataset is ~460,000 rows). "
-        "The `from` and `to` fields report the earliest and latest dates in the returned rows."
+        "The `from` and `to` fields report the earliest and latest dates in the returned rows.\n\n"
+        "The response is streamed, so `count`, `from` and `to` come after `data` in the document."
     ),
     responses=_resp({
-        "count": 2,
-        "from": "2021-09-09",
-        "to": "2026-09-08",
         "data": [
             {"symbol": "EURUSD=X", "date": "2021-09-09", "open": 1.1810, "high": 1.1840,
              "low": 1.1800, "close": 1.1825, "volume": 0},
             {"symbol": "EURUSD=X", "date": "2026-09-08", "open": 1.1628, "high": 1.1639,
              "low": 1.1600, "close": 1.1617, "volume": 0},
         ],
+        "count": 2,
+        "from": "2021-09-09",
+        "to": "2026-09-08",
     }),
 )
 def get_history_all(
-    request: Request,
     limit: int = Query(50000, ge=1, le=500000, description="Maximum number of rows to return."),
-    db: Session = Depends(get_db),
 ):
-    def _produce():
-        rows = db.execute(
+    if SessionLocal is None:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is not configured.")
+    return StreamingResponse(_stream_history_all(limit), media_type="application/json")
+
+
+_STREAM_CHUNK_ROWS = 2000
+
+
+def _stream_history_all(limit: int):
+    """Yield the /history/all JSON document piece by piece.
+
+    Rows come from an unbuffered (server-side) cursor and are written out in
+    chunks, so even the full ~460k-row dump never sits in memory at once.
+    `count`, `from` and `to` are only known at the end, so they follow `data`.
+    """
+    db = SessionLocal()
+    try:
+        result = db.execute(
             text(
                 "SELECT symbol, date, open, high, low, close, volume "
                 "FROM daily_prices ORDER BY symbol, date ASC LIMIT :limit"
             ),
             {"limit": limit},
-        ).fetchall()
-        data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
-        earliest = min((item["date"] for item in data), default=None)
-        latest = max((item["date"] for item in data), default=None)
-        return {"count": len(data), "from": earliest, "to": latest, "data": data}
-    return _gzip_big_response(request, f"history_all:{limit}", cache_stats()["loaded_at"], _produce)
+            execution_options={"stream_results": True},
+        )
+        yield b'{"data":['
+        count = 0
+        earliest = latest = None
+        for rows in result.partitions(_STREAM_CHUNK_ROWS):
+            pieces = []
+            for row in rows:
+                bar = {"symbol": row.symbol, **price_bar_to_dict(row)}
+                if earliest is None or bar["date"] < earliest:
+                    earliest = bar["date"]
+                if latest is None or bar["date"] > latest:
+                    latest = bar["date"]
+                pieces.append(json.dumps(bar, separators=(",", ":")))
+            yield (("," if count else "") + ",".join(pieces)).encode("utf-8")
+            count += len(pieces)
+        summary = json.dumps({"count": count, "from": earliest, "to": latest}, separators=(",", ":"))
+        yield ("]," + summary[1:]).encode("utf-8")
+    finally:
+        db.close()
 
 
 def _cache_window_start() -> date:
@@ -726,21 +763,21 @@ def _range_from_cache(from_date: date, to_date: date):
     Only callers that have already confirmed the range starts within the cached
     window should use this.
     """
-    cache = get_all()
-    if not cache:
+    cached = cache.get_all()
+    if not cached:
         return None
-    lo, hi = str(from_date), str(to_date)
+    first_day, last_day = str(from_date), str(to_date)
     data = []
-    for symbol, history in cache.items():
+    for symbol, history in cached.items():
         for bar in history:
-            if lo <= bar["date"] <= hi:
+            if first_day <= bar["date"] <= last_day:
                 data.append({"symbol": symbol, **bar})
                 if len(data) > HISTORY_RANGE_MAX_ROWS:
                     raise HTTPException(
                         status_code=413,
                         detail=f"Date range exceeds the {HISTORY_RANGE_MAX_ROWS:,}-row limit.",
                     )
-    return {"count": len(data), "from": lo, "to": hi, "data": data}
+    return {"count": len(data), "from": first_day, "to": last_day, "data": data}
 
 
 @router.get(
@@ -798,11 +835,11 @@ def get_history_range(
                 status_code=413,
                 detail=f"Date range exceeds the {HISTORY_RANGE_MAX_ROWS:,}-row limit.",
             )
-        data = [{"symbol": r.symbol, **_row_to_dict(r)} for r in rows]
+        data = [{"symbol": row.symbol, **price_bar_to_dict(row)} for row in rows]
         return {"count": len(data), "from": str(from_date), "to": str(to_date),
                 "data": data, "source": "database"}
 
-    return _gzip_big_response(request, f"history_range:{from_date}:{to_date}", cache_stats()["loaded_at"], _produce)
+    return _gzip_big_response(request, f"history_range:{from_date}:{to_date}", cache.stats()["loaded_at"], _produce)
 
 
 @router.get(
@@ -818,7 +855,7 @@ def get_last_updated(db: Session = Depends(get_db)):
     rows = db.execute(
         text("SELECT symbol, MAX(date) AS last_date FROM daily_prices GROUP BY symbol ORDER BY symbol")
     ).fetchall()
-    return [{"symbol": r.symbol, "last_date": str(r.last_date)} for r in rows]
+    return [{"symbol": row.symbol, "last_date": str(row.last_date)} for row in rows]
 
 
 @router.get(
@@ -865,14 +902,13 @@ def run_backfill_symbol(
 ):
     rows = backfill(symbol)
     if rows > 0:
-        invalidate_cache()
-        refresh_cache()
-        catalog.refresh()
+        cache.load()
+        catalog.load()
     return {
         "status": "done" if rows > 0 else "no_data",
         "symbol": symbol,
         "rows_written": rows,
-        "latest": _row_to_dict(_latest(symbol, db)),
+        "latest": price_bar_to_dict(_latest(symbol, db)),
     }
 
 
@@ -947,15 +983,15 @@ def add_tracked_asset(payload: AddAssetRequest):
     name, asset_type = payload.name, payload.asset_type
     inception_date = None
     if name is None or asset_type is None:
-        chk = check_symbol(payload.symbol)
-        if not chk["exists"]:
+        check = check_symbol(payload.symbol)
+        if not check["exists"]:
             raise HTTPException(
                 status_code=422,
-                detail=chk["note"] or f"Symbol '{payload.symbol}' was not found on Yahoo Finance.",
+                detail=check["note"] or f"Symbol '{payload.symbol}' was not found on Yahoo Finance.",
             )
-        name = name or chk["name"] or payload.symbol
-        asset_type = asset_type or chk["suggested_type"]
-        inception_date = chk.get("inception_date")
+        name = name or check["name"] or payload.symbol
+        asset_type = asset_type or check["suggested_type"]
+        inception_date = check.get("inception_date")
         if asset_type is None:
             raise HTTPException(
                 status_code=422,
@@ -964,10 +1000,10 @@ def add_tracked_asset(payload: AddAssetRequest):
     try:
         asset = add_asset(payload.symbol, name, asset_type, payload.properties,
                           inception_date=inception_date)
-        catalog.refresh()
+        catalog.load()
         return asset
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
 
 
 @router.post(
@@ -1000,15 +1036,15 @@ def onboard_asset(payload: OnboardAssetRequest, db: Session = Depends(get_db)):
     if asset_exists(symbol):
         raise HTTPException(status_code=409, detail=f"Symbol '{symbol}' is already tracked.")
 
-    chk = check_symbol(symbol)
-    if not chk["exists"]:
+    check = check_symbol(symbol)
+    if not check["exists"]:
         raise HTTPException(
             status_code=422,
-            detail=chk["note"] or f"Symbol '{symbol}' was not found on Yahoo Finance.",
+            detail=check["note"] or f"Symbol '{symbol}' was not found on Yahoo Finance.",
         )
 
-    name = payload.name or chk["name"] or symbol
-    asset_type = payload.asset_type or chk["suggested_type"]
+    name = payload.name or check["name"] or symbol
+    asset_type = payload.asset_type or check["suggested_type"]
     if asset_type is None:
         raise HTTPException(
             status_code=422,
@@ -1016,30 +1052,29 @@ def onboard_asset(payload: OnboardAssetRequest, db: Session = Depends(get_db)):
         )
 
     try:
-        asset = add_asset(symbol, name, asset_type, inception_date=chk.get("inception_date"))
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        asset = add_asset(symbol, name, asset_type, inception_date=check.get("inception_date"))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
 
     try:
         rows = backfill(symbol, retry_base=SLOW_YF_RETRY_BASE_SECONDS)
-    except Exception as e:
-        catalog.refresh()
+    except Exception as error:
+        catalog.load()
         raise HTTPException(
             status_code=502,
-            detail=f"Asset '{symbol}' was added, but the history backfill failed: {e}. "
+            detail=f"Asset '{symbol}' was added, but the history backfill failed: {error}. "
                    f"Retry via POST /finance/admin/assets/{symbol}/backfill.",
         )
 
-    catalog.refresh()
+    catalog.load()
     if rows > 0:
-        invalidate_cache()
-        refresh_cache()
+        cache.load()
 
     return {
         "status": "done",
         "asset": asset,
         "rows_written": rows,
-        "latest": _row_to_dict(_latest(symbol, db)),
+        "latest": price_bar_to_dict(_latest(symbol, db)),
     }
 
 
@@ -1073,14 +1108,13 @@ def backfill_tracked_asset(
         )
     rows = backfill(symbol)
     if rows > 0:
-        invalidate_cache()
-        refresh_cache()
-        catalog.refresh()
+        cache.load()
+        catalog.load()
     return {
         "status": "done" if rows > 0 else "no_data",
         "symbol": symbol,
         "rows_written": rows,
-        "latest": _row_to_dict(_latest(symbol, db)),
+        "latest": price_bar_to_dict(_latest(symbol, db)),
     }
 
 
@@ -1105,7 +1139,7 @@ def backfill_tracked_asset(
     dependencies=[Depends(require_admin)],
 )
 def get_cache_details():
-    return cache_details()
+    return cache.details()
 
 
 @router.post(
@@ -1125,11 +1159,10 @@ def get_cache_details():
     dependencies=[Depends(require_admin)],
 )
 def refresh_cache_from_database():
-    catalog.refresh()
-    invalidate_cache()
-    if not refresh_cache():
+    catalog.load()
+    if not cache.load():
         raise HTTPException(status_code=503, detail="Cache refresh failed.")
-    stats = cache_stats()
+    stats = cache.stats()
     return {
         "status": "done",
         "refreshed_at": stats["loaded_at"],
@@ -1144,7 +1177,7 @@ def refresh_cache_from_database():
     description=(
         "Most recent daily bar for **any** symbol present in the database — works for the "
         "hardcoded instruments as well as ad-hoc symbols added via `/finance/admin/backfill-symbol`.\n\n"
-        "6404 if the symbol has no stored data."
+        "Returns 404 if the symbol has no stored data."
     ),
     responses=_resp({
         "symbol": "LTC-USD",
@@ -1159,7 +1192,7 @@ def get_symbol(
     row = _latest(symbol, db)
     if row is None:
         raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
-    result = {"symbol": symbol, "latest": _row_to_dict(row)}
+    result = {"symbol": symbol, "latest": price_bar_to_dict(row)}
     meta = catalog.get_symbol(symbol)
     if meta:
         result["name"] = meta.get("name")
@@ -1198,7 +1231,7 @@ def get_symbol_history(
     rows = _history(symbol, db)
     if not rows:
         raise HTTPException(status_code=404, detail=f"No data for symbol '{symbol}'.")
-    result = {"symbol": symbol, "count": len(rows), "history": [_row_to_dict(r) for r in rows]}
+    result = {"symbol": symbol, "count": len(rows), "history": [price_bar_to_dict(row) for row in rows]}
     meta = catalog.get_symbol(symbol)
     if meta:
         result["name"] = meta.get("name")
@@ -1212,15 +1245,17 @@ def get_symbol_history(
 
 
 def _ingestion_summary(db: Session, results):
+    assets = get_tracked_assets(db)
+    latest = _latest_many([asset["symbol"] for asset in assets], db)
     summary = []
-    for asset in get_tracked_assets(db):
-        row = _latest(asset["symbol"], db)
+    for asset in assets:
+        row = latest.get(asset["symbol"])
         summary.append({
             "symbol":       asset["symbol"],
             "name":         asset["name"],
             "asset_type":   asset["asset_type"],
             "rows_written": results.get(asset["symbol"]),
-            "latest":       _row_to_dict(row),
+            "latest":       price_bar_to_dict(row),
         })
     return summary
 
@@ -1249,10 +1284,9 @@ def _ingestion_summary(db: Session, results):
     dependencies=[Depends(require_admin)],
 )
 def run_backfill(db: Session = Depends(get_db)):
-    catalog.refresh()
-    invalidate_cache()
-    results = backfill_all()
-    refresh_cache()
+    catalog.load()
+    results = _run_bulk_job(backfill_all)
+    cache.load()
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "results": _ingestion_summary(db, results)}
 
@@ -1285,10 +1319,9 @@ def run_backfill(db: Session = Depends(get_db)):
     dependencies=[Depends(require_admin)],
 )
 def run_backfill_missing(db: Session = Depends(get_db)):
-    catalog.refresh()
-    invalidate_cache()
-    results = backfill_missing()
-    refresh_cache()
+    catalog.load()
+    results = _run_bulk_job(backfill_missing)
+    cache.load()
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "results": _ingestion_summary(db, results)}
 
@@ -1316,8 +1349,8 @@ def run_backfill_missing(db: Session = Depends(get_db)):
     dependencies=[Depends(require_admin)],
 )
 def run_backfill_inception_dates():
-    results = backfill_inception_dates()
-    catalog.refresh()
+    results = _run_bulk_job(backfill_inception_dates)
+    catalog.load()
     return {
         "status":     "done",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -1338,7 +1371,7 @@ def run_backfill_inception_dates():
 )
 
 def get_cache_status():
-    return cache_stats()
+    return cache.stats()
 
 
 @router.get(
@@ -1361,23 +1394,23 @@ def get_cache_status():
     }),
 )
 def get_cache_all(request: Request):
-    fresh = cache_stats()["loaded_at"]
+    fresh = cache.stats()["loaded_at"]
     def _produce():
-        cache = get_all()
-        data = [{"symbol": sym, "history": history} for sym, history in cache.items()]
-        total = sum(len(h) for h in cache.values())
+        cached = cache.get_all()
+        data = [{"symbol": symbol, "history": history} for symbol, history in cached.items()]
+        total = sum(len(history) for history in cached.values())
         return {"count": total, "symbols": len(data), "data": data}
     return _gzip_big_response(request, "cache:all", fresh, _produce)
 
 
 def _cache_by_type(request: Request, key: str, symbols: list) -> Response:
-    fresh = cache_stats()["loaded_at"]
+    fresh = cache.stats()["loaded_at"]
     def _produce():
-        cache = get_all()
-        wanted = {s["symbol"] for s in symbols}
-        filtered = {sym: hist for sym, hist in cache.items() if sym in wanted}
-        data = [{"symbol": sym, "history": hist} for sym, hist in filtered.items()]
-        total = sum(len(h) for h in filtered.values())
+        cached = cache.get_all()
+        wanted = {asset["symbol"] for asset in symbols}
+        filtered = {symbol: history for symbol, history in cached.items() if symbol in wanted}
+        data = [{"symbol": symbol, "history": history} for symbol, history in filtered.items()]
+        total = sum(len(history) for history in filtered.values())
         return {"count": total, "symbols": len(data), "data": data}
     return _gzip_big_response(request, key, fresh, _produce)
 
@@ -1446,7 +1479,7 @@ def get_cache_cryptos(request: Request):
 def get_cache_symbol(
     symbol: str = Path(..., description="Exact Yahoo Finance symbol.", examples=["^VIX", "GC=F"]),
 ):
-    history = get_symbol(symbol)
+    history = cache.get_symbol(symbol)
     if history is None:
         raise HTTPException(status_code=404, detail=f"No cached data for symbol '{symbol}'.")
     return {"symbol": symbol, "count": len(history), "history": history}
@@ -1454,7 +1487,7 @@ def get_cache_symbol(
 
 @router.get(
     "/logs",
-    summary="Recent ingestion logs (last 7 days)",
+    summary="Recent ingestion logs, last 7 days (admin)",
     description=(
         "Returns all structured log events from the `api_logs` table for the past 7 days, "
         "sorted most-recent-first. Useful for diagnosing scheduler or fetch failures."
@@ -1476,6 +1509,7 @@ def get_cache_symbol(
             },
         ],
     }),
+    dependencies=[Depends(require_admin)],
 )
 def get_logs(db: Session = Depends(get_db)):
     rows = db.execute(
@@ -1487,18 +1521,18 @@ def get_logs(db: Session = Depends(get_db)):
         )
     ).fetchall()
     logs = []
-    for r in rows:
+    for row in rows:
         logs.append({
-            "id":           r.id,
-            "recorded_at":  str(r.recorded_at),
-            "logger":       r.logger,
-            "level":        r.level,
-            "message":      r.message,
-            "symbol":       r.symbol,
-            "duration_ms":  r.duration_ms,
-            "rows_written": r.rows_written,
-            "success":      bool(r.success),
-            "exception":    r.exception,
+            "id":           row.id,
+            "recorded_at":  str(row.recorded_at),
+            "logger":       row.logger,
+            "level":        row.level,
+            "message":      row.message,
+            "symbol":       row.symbol,
+            "duration_ms":  row.duration_ms,
+            "rows_written": row.rows_written,
+            "success":      bool(row.success),
+            "exception":    row.exception,
         })
     return {"count": len(logs), "logs": logs}
 
@@ -1527,9 +1561,8 @@ def get_logs(db: Session = Depends(get_db)):
     dependencies=[Depends(require_admin)],
 )
 def run_daily_ingest(db: Session = Depends(get_db)):
-    catalog.refresh()
-    invalidate_cache()
-    results = ingest_daily_all()
-    refresh_cache()
+    catalog.load()
+    results = _run_bulk_job(ingest_daily_all)
+    cache.load()
     return {"status": "done", "fetched_at": datetime.now(timezone.utc).isoformat(),
             "results": _ingestion_summary(db, results)}

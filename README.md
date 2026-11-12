@@ -106,7 +106,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/crypto`                   | Latest price for all cryptocurrencies                             |
 | GET    | `/finance/crypto/{symbol}`          | Latest price for one crypto (e.g. `BTC-USD`)                      |
 | GET    | `/finance/crypto/{symbol}/history`  | Full-window daily history for one crypto                               |
-| GET    | `/finance/history/all`              | Full dump, every stored bar, all assets (default cap 50,000 rows) |
+| GET    | `/finance/history/all`              | Full dump, every stored bar, all assets (default cap 50,000 rows, `limit` up to 500,000; streamed, so `count`/`from`/`to` follow `data`) |
 | GET    | `/finance/history/range?from&to`    | Up to 50,000 bars between two dates, all assets (HTTP 413 if exceeded; served from cache when `from` is within the cache window, else DB) |
 | GET    | `/finance/symbol/{symbol}`          | Latest bar for any stored symbol (incl. ad-hoc additions)         |
 | GET    | `/finance/symbol/{symbol}/history`  | Full history for any stored symbol                                |
@@ -123,7 +123,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 
 For an existing database, run `sql/migrate_finance_schema.sql` once to add the `assets.inception_date` column and the daily-price date index. New databases get both from the create-table scripts.
 
-## Admin endpoints (require `X-Admin-Key` when `ADMIN_KEY` is set)
+## Admin endpoints (require the `X-Admin-Key` header)
 
 | Method | Endpoint                                  | Description                                                                                |
 | ------ | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -133,7 +133,7 @@ For an existing database, run `sql/migrate_finance_schema.sql` once to add the `
 | POST   | `/finance/admin/assets/onboard`           | One-call onboarding: verify symbol → add asset → full backfill → refresh cache (~1 min)    |
 | POST   | `/finance/admin/assets/{symbol}/backfill` | **Fast** full-window backfill for one tracked asset                                        |
 | GET    | `/finance/admin/backfill-symbol`          | **Fast** full-window backfill for one arbitrary Yahoo symbol                               |
-| POST   | `/finance/admin/backfill-inception-dates` | **Slow** capture missing `inception_date`s so young assets are not re-fetched              |
+| POST   | `/finance/admin/assets/backfill-inception-dates` | **Slow** capture missing `inception_date`s so young assets are not re-fetched       |
 | POST   | `/finance/admin/backfill-missing`         | **Slow & safe** backfill of assets missing their expected history (gentle pacing)          |
 | POST   | `/finance/admin/backfill`                 | **Medium** backfill of ALL assets (throttled ~2s between symbols)                          |
 | POST   | `/finance/admin/ingest-daily`             | Run the daily fetch now                                                                    |
@@ -141,7 +141,9 @@ For an existing database, run `sql/migrate_finance_schema.sql` once to add the `
 | GET    | `/finance/admin/cache/details`            | Detailed cache report (per-symbol coverage, rows, estimated memory)                        |
 | GET    | `/finance/logs`                           | Recent ingestion logs (last 7 days)                                                        |
 
-Admin endpoints require the `X-Admin-Key` header when `ADMIN_KEY` is set in the environment.
+Admin endpoints (and `/finance/logs`) require the `X-Admin-Key` header to match the `ADMIN_KEY` environment variable. When `ADMIN_KEY` is not set, they are disabled and answer HTTP 503.
+
+Only one bulk job (nightly ingestion, `backfill`, `backfill-missing`, `backfill-inception-dates`) runs at a time. Starting another while one is running answers HTTP 409; the scheduled run is skipped and logged.
 
 The scheduler runs the daily incremental ingestion automatically every day at:
 
@@ -153,22 +155,26 @@ The scheduler runs the daily incremental ingestion automatically every day at:
 | New York (EST/EDT) | 18:00 (winter) / 19:00 (summer)                   |
 | Tokyo (JST)        | 08:00 next day (no DST)                           |
 
-Each nightly run fills assets missing their expected history, scans stored dates for long gaps, repairs detected gaps using Yahoo Finance's returned trading dates, and fetches an overlapping recent window to capture late bars and corrections. `INGEST_OVERLAP_DAYS` controls the recent overlap (default 7). The gap scan tolerates up to `INGEST_MARKET_GAP_DAYS` calendar days (default 14) for market assets and treats any missing day as a gap for crypto, which trades daily. A deterministic rotation gives each tracked asset a full configured-history audit about once every `HISTORY_AUDIT_CYCLE_DAYS` (default 30 days), spreading provider requests across nights. The final nightly check scans all stored bars for malformed OHLC values and abnormal close-to-close moves. It re-fetches suspicious dates with surrounding Yahoo history and replaces stored data only when the returned bar and adjacent price sequence pass validation; unresolved cases remain unchanged and are logged for review. During ingestion, invalid OHLC bars and price moves over the absolute `PRICE_HARD_MAX_RETURN` limit (default 80%) are skipped. Smaller moves are compared with the asset's recent returns after at least `PRICE_OUTLIER_MIN_SAMPLES` observations (default 20); moves beyond the larger of `PRICE_OUTLIER_SIGMA` robust standard deviations (default 8) or the minimum return floor (default 2%) are also skipped and logged.
+Each nightly run fills assets missing their expected history, scans stored dates for long gaps, repairs detected gaps using Yahoo Finance's returned trading dates, and fetches an overlapping recent window to capture late bars and corrections. `INGEST_OVERLAP_DAYS` controls the recent overlap (default 7). The gap scan tolerates up to `INGEST_MARKET_GAP_DAYS` calendar days (default 14) for market assets and treats any missing day as a gap for crypto, which trades daily. A deterministic rotation gives each tracked asset a full configured-history audit about once every `HISTORY_AUDIT_CYCLE_DAYS` (default 30 days), spreading provider requests across nights. The final nightly check scans all stored bars for malformed OHLC values and abnormal close-to-close moves. It re-fetches suspicious dates with surrounding Yahoo history and replaces stored data only when the returned bar passes the same checks; unresolved cases remain unchanged and are logged for review.
+
+During ingestion, invalid OHLC bars are skipped. A bar is also skipped as a **spike** when its close jumps abnormally away from the previous close *and* the next close comes back at least halfway with another abnormal move. Real moves (earnings gaps, crashes, rallies) stay at their new level and are kept. A move is abnormal above the absolute `PRICE_HARD_MAX_RETURN` limit (default 80%), or, after at least `PRICE_OUTLIER_MIN_SAMPLES` recent moves (default 20), beyond the larger of `PRICE_OUTLIER_SIGMA` robust standard deviations (default 8) or the minimum return floor (default 2%). The newest bar has no next bar yet, so it is only held back above the hard limit; the overlap window re-checks it the next night. Skipped bars are logged.
+
+Prices are split- and dividend-adjusted by Yahoo. When the overlap window shows that Yahoo rescaled closes the database already holds (a split or dividend), the nightly run re-fetches that asset's full history window instead of appending to the old scale.
 
 ## In-memory cache
 
 The rolling `CACHE_HISTORY_YEARS` window of `daily_prices` rows is loaded into an in-memory cache at startup and served by the `/finance/cache/*` endpoints **without any database round-trip** — ideal for read-heavy public pages. This is intentionally smaller than `HISTORY_YEARS`: the database stores the full history (see `/finance/*/history`), while the RAM cache is capped to fit the host's memory budget.
 
-- **Memory footprint:** ~**400 bytes per row** (the cache holds Python dicts) ≈ 20 MB for ~47k rows (1y), 95 MB (5y) and ~190 MB (10y). The default is `CACHE_HISTORY_YEARS=1` so a 512 Mi instance stays well within budget; raise it only if the deployment has more RAM.
-- **Consumer pattern:** a client's first load pulls the full 10-year history via `/finance/history/all` or `/finance/history/range` (database). Subsequent incremental loads pass a recent `from` date to `/finance/history/range`, which is then served from this cache with no database round-trip.
-- **Lifecycle:** loaded once at startup → refreshed automatically after each scheduled ingestion (Mon-Fri 23:00 UTC) → fully **invalidated and rebuilt** whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data or `POST /finance/admin/cache/refresh` is called. Cache loads include the rolling window from the database, so stale data is never served during a refresh cycle.
+- **Memory footprint:** ~**470 bytes per row** (the cache holds Python dicts with float prices) ≈ 22 MB for ~47k rows (1y), 110 MB (5y) and ~215 MB (10y). The default is `CACHE_HISTORY_YEARS=1` so a 512 Mi instance stays well within budget; raise it only if the deployment has more RAM.
+- **Consumer pattern:** a client's first load pulls the full 10-year history via `/finance/history/all?limit=500000` (database, streamed). Subsequent incremental loads pass a recent `from` date to `/finance/history/range`, which is then served from this cache with no database round-trip.
+- **Lifecycle:** loaded once at startup → reloaded automatically after each scheduled ingestion (daily 23:00 UTC) → reloaded whenever a manual admin fetch (`ingest-daily`, `backfill`, `backfill-symbol`) writes new data or `POST /finance/admin/cache/refresh` is called. A reload builds the new data first and swaps it in one step, so the cache keeps serving the previous data while a fetch runs and is never empty or half-built.
 - **Monitoring:** `GET /finance/cache/status` (public) gives quick stats; `GET /finance/admin/cache/details` (admin) gives per-symbol coverage and an estimated memory footprint — handy to confirm the cache rebuilt correctly after a deploy.
 
 > Note: the cache is in-process, so every deploy starts fresh and rebuilds from the database in a few seconds.
 
 ## Compression
 
-The API applies **gzip compression** (via `GZipMiddleware`, level 5) to every response ≥ 1 KB for clients that advertise `Accept-Encoding: gzip` (all browsers and `curl`).
+The API applies **gzip compression** (via `GZipMiddleware`, level 5) to every response ≥ 4 KB for clients that advertise `Accept-Encoding: gzip` (all browsers and `curl`).
 
 Because JSON is highly repetitive, this reduces payload sizes by roughly **75-80%**:
 
@@ -179,6 +185,15 @@ Because JSON is highly repetitive, this reduces payload sizes by roughly **75-80
 | `/finance/cache/{symbol}` | ~130 KB      | ~30 KB            |
 
 This is especially relevant on Render's free tier, which caps outbound HTTP bandwidth at **5 GB/month**, per-symbol or per-asset-class calls use ~100× less bandwidth than the full dump.
+
+## Tests
+
+The tests run offline: no database, no Yahoo Finance calls, no scheduler.
+
+```bash
+venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+venv/Scripts/python.exe -m pytest
+```
 
 ## License
 

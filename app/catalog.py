@@ -1,7 +1,7 @@
 """In-memory catalogue of tracked assets, sourced from the `assets` table.
 
 The public catalogue is loaded from the database at startup and refreshed
-whenever an admin adds an asset or recomputes the price cache, so new
+(`load()`) whenever an admin adds an asset or reloads the price cache, so new
 instruments appear in the public endpoints without a redeploy. Mirrors the
 price-cache pattern in cache.py.
 """
@@ -40,22 +40,22 @@ def _merged(item) -> dict:
 
 
 def _build_from(assets) -> int:
-    grouped = {g: [] for g in _GROUPS}
+    grouped = {group: [] for group in _GROUPS}
     symbol_map = {}
-    lower_maps = {t: {} for t in _MAP_TYPES}
+    lower_maps = {asset_type: {} for asset_type in _MAP_TYPES}
     total = 0
     for item in assets:
         row = _merged(item)
         symbol_map[row["symbol"]] = row
-        group = _TYPE_TO_GROUP.get(item.get("asset_type"))
+        asset_type = item.get("asset_type")
+        group = _TYPE_TO_GROUP.get(asset_type)
         if group:
             grouped[group].append(row)
             total += 1
-        atype = item.get("asset_type")
-        if atype == "metal":
+        if asset_type == "metal":
             lower_maps["metal"][row["name"].lower()] = row
-        elif atype in lower_maps:
-            lower_maps[atype][row["symbol"].lower()] = row
+        elif asset_type in lower_maps:
+            lower_maps[asset_type][row["symbol"].lower()] = row
     with _lock:
         _catalog.clear()
         _catalog.update(grouped)
@@ -70,8 +70,8 @@ def load() -> bool:
     global _loaded_at
     try:
         assets = get_all_assets()
-    except Exception as e:
-        logger.error("Could not read the assets table: %s", e)
+    except Exception as error:
+        logger.error("Could not read the assets table: %s", error)
         return False
     total = _build_from(assets)
     with _lock:
@@ -83,24 +83,9 @@ def load() -> bool:
     return True
 
 
-def invalidate() -> None:
-    global _loaded_at
-    with _lock:
-        _catalog.clear()
-        _symbol_map.clear()
-        _lower_maps.clear()
-        _loaded_at = None
-    logger.info("Catalogue invalidated — awaiting rebuild.")
-
-
-def refresh() -> bool:
-    """Reload the catalogue from the assets table. Call after admin mutations."""
-    return load()
-
-
 def get_catalog() -> dict:
     with _lock:
-        return {g: list(_catalog.get(g, [])) for g in _GROUPS}
+        return {group: list(_catalog.get(group, [])) for group in _GROUPS}
 
 
 def get_group(asset_type: str) -> list:
@@ -109,11 +94,6 @@ def get_group(asset_type: str) -> list:
         return []
     with _lock:
         return list(_catalog.get(group, []))
-
-
-def get_symbol_map() -> dict:
-    with _lock:
-        return dict(_symbol_map)
 
 
 def get_symbol(symbol: str):
