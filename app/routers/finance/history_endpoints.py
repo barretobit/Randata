@@ -1,4 +1,4 @@
-"""Public endpoints across all assets: bulk history, any stored symbol, catalogue and freshness."""
+"""Public endpoints across all assets: bulk history, any stored symbol, catalogue, freshness and logs."""
 
 import json
 from datetime import date
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ... import cache, catalog, db, price_repository
 from ...db import get_db
+from ...logging_config import LOG_RETENTION_DAYS, get_recent_logs
 from ...price_repository import price_bar_to_dict
 from . import examples
 from .responses import cached_json_response
@@ -152,6 +153,21 @@ def get_last_updated(session: Session = Depends(get_db)):
 )
 def list_assets():
     return catalog.get_catalog()
+
+
+@router.get(
+    "/logs/all",
+    summary="All stored ingestion logs",
+    description=(
+        f"Returns every structured log event in the `api_logs` table (the last {LOG_RETENTION_DAYS} days; "
+        "older rows are deleted nightly), sorted most-recent-first. Public: useful for checking that the "
+        "nightly ingestion ran and which bars were skipped or repaired."
+    ),
+    responses=examples.GET_LOGS,
+)
+def get_all_logs(session: Session = Depends(get_db)):
+    logs = get_recent_logs(session, days=None)
+    return {"count": len(logs), "logs": logs}
 
 
 def _with_catalogue_details(result: dict, symbol: str) -> dict:

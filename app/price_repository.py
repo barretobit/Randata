@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 from typing import Iterator
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from .config import INGEST_MARKET_GAP_DAYS
 from .db import session_scope
@@ -169,6 +169,35 @@ def get_recent_closes_before(symbol: str, before: date, limit: int, session=None
         for row in reversed(rows)
         if row.close is not None and row.close > 0
     ]
+
+
+def get_next_close_after(symbol: str, after: date, session=None) -> tuple | None:
+    """The first positive (date, close) pair stored after a date, or None."""
+    with session_scope(session) as active_session:
+        row = active_session.execute(
+            text(
+                "SELECT date, close FROM daily_prices "
+                "WHERE symbol = :symbol AND date > :after AND close > 0 "
+                "ORDER BY date LIMIT 1"
+            ),
+            {"symbol": symbol, "after": after},
+        ).fetchone()
+    return (row.date, float(row.close)) if row else None
+
+
+def delete_bars(symbol: str, dates: list[date], session=None) -> int:
+    """Delete one symbol's bars on the given dates. Returns how many rows were removed."""
+    if not dates:
+        return 0
+    with session_scope(session) as active_session:
+        result = active_session.execute(
+            text("DELETE FROM daily_prices WHERE symbol = :symbol AND date IN :dates").bindparams(
+                bindparam("dates", expanding=True)
+            ),
+            {"symbol": symbol, "dates": list(dates)},
+        )
+        active_session.commit()
+        return result.rowcount
 
 
 def get_closes_from(symbol: str, start: date, session=None) -> list[tuple]:

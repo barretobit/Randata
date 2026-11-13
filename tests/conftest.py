@@ -20,11 +20,15 @@ ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
 
 
 class FakeResult:
-    def __init__(self, rows):
+    def __init__(self, rows, rowcount=0):
         self.rows = list(rows)
+        self.rowcount = rowcount
 
     def fetchall(self):
         return list(self.rows)
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
     def scalar(self):
         return self.rows[0][0] if self.rows else None
@@ -38,18 +42,23 @@ class FakeSession:
     """Stands in for a SQLAlchemy session.
 
     Reads are answered in order from `reads` (one list of rows per query).
-    Bulk writes (a list of parameter dicts) are recorded in `writes`.
+    Bulk writes (a list of parameter dicts) are recorded in `writes`, and
+    DELETE parameters in `deletes` (each reports one removed row per date).
     """
 
     def __init__(self, reads=()):
         self.reads = list(reads)
         self.writes = []
+        self.deletes = []
         self.commits = 0
 
     def execute(self, statement, params=None, **options):
         if isinstance(params, list):
             self.writes.extend(params)
             return FakeResult([])
+        if str(statement).lstrip().upper().startswith("DELETE"):
+            self.deletes.append(params)
+            return FakeResult([], rowcount=len(params.get("dates", [])))
         return FakeResult(self.reads.pop(0) if self.reads else [])
 
     def commit(self):

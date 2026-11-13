@@ -95,3 +95,30 @@ def test_history_all_with_no_rows_is_valid_json(client, monkeypatch):
     monkeypatch.setattr(db, "SessionLocal", lambda: FakeSession(reads=[[]]))
     body = client.get("/finance/history/all").json()
     assert body == {"data": [], "count": 0, "from": None, "to": None}
+
+
+def test_all_logs_are_public(monkeypatch):
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        id=1, recorded_at="2026-11-12 23:00:01", logger="ingestion", level="WARNING",
+        message="Skipped price spike", symbol="NVDA", duration_ms=None, rows_written=None,
+        success=0, exception=None,
+    )
+    app.dependency_overrides[get_db] = lambda: FakeSession(reads=[[row, row]])
+    try:
+        response = TestClient(app).get("/finance/logs/all")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert response.json()["logs"][0]["message"] == "Skipped price spike"
+
+
+def test_old_logs_are_deleted_after_90_days():
+    from app.logging_config import delete_old_logs
+
+    session = FakeSession()
+    delete_old_logs(session=session)
+    assert session.deletes == [{"days": 90}]
+    assert session.commits == 1

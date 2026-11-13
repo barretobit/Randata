@@ -31,7 +31,7 @@ from .config import (
     SLOW_YAHOO_RETRY_BASE_SECONDS,
     YAHOO_RETRY_BASE_SECONDS,
 )
-from .logging_config import get_logger, log_event
+from .logging_config import LOG_RETENTION_DAYS, delete_old_logs, get_logger, log_event
 from .price_validation import (
     RECENT_MOVES_WINDOW,
     find_price_spikes,
@@ -116,7 +116,12 @@ def _is_rotation_night(key: str, today: date) -> bool:
 # ---------------------------------------------------------------------------
 
 def _store_frame(symbol: str, frame: pd.DataFrame) -> int:
-    """Validate a Yahoo frame against the stored bars before it and upsert the good bars."""
+    """Validate a Yahoo frame against its stored neighbours, upsert the good bars, drop spikes.
+
+    The newest bar is stored before its next bar exists, so a glitch can only be
+    confirmed a night later, when the overlap window fetches it again. Any bar
+    confirmed as a spike is then also deleted if it was stored earlier.
+    """
     bars, invalid_dates = frame_to_bars(symbol, frame)
     for invalid_date in invalid_dates:
         _log_warning(symbol, f"Skipped invalid OHLC bar for {symbol} on {invalid_date}.")
@@ -125,10 +130,15 @@ def _store_frame(symbol: str, frame: pd.DataFrame) -> int:
     prior_closes = price_repository.get_recent_closes_before(
         symbol, bars[0]["date"], RECENT_MOVES_WINDOW + 1
     )
-    spikes = find_price_spikes(prior_closes + [(bar["date"], bar["close"]) for bar in bars])
+    # When filling a gap, the stored bar right after it confirms or rejects the last fetched bar.
+    next_close = price_repository.get_next_close_after(symbol, bars[-1]["date"])
+    closes = prior_closes + [(bar["date"], bar["close"]) for bar in bars]
+    spikes = find_price_spikes(closes + ([next_close] if next_close else []))
     bars_to_store = []
+    spike_dates = []
     for offset, bar in enumerate(bars):
         if len(prior_closes) + offset in spikes:
+            spike_dates.append(bar["date"])
             _log_warning(
                 symbol,
                 f"Skipped price spike for {symbol} on {bar['date']}: close {bar['close']} "
@@ -137,6 +147,13 @@ def _store_frame(symbol: str, frame: pd.DataFrame) -> int:
             continue
         bars_to_store.append(bar)
     price_repository.upsert_bars(bars_to_store)
+    removed = price_repository.delete_bars(symbol, spike_dates)
+    if removed:
+        _log_warning(
+            symbol,
+            f"Removed {removed} previously stored price spike(s) for {symbol} "
+            f"(checked dates: {', '.join(map(str, spike_dates))}).",
+        )
     return len(bars_to_store)
 
 
@@ -474,4 +491,9 @@ def ingest_daily_all() -> dict:
                 _throttle(INGEST_DELAY_SECONDS, INGEST_JITTER_SECONDS)
         logger.info("ingest_daily_all finished: %d assets", len(assets))
         audit_and_repair_history()
+        try:
+            removed = delete_old_logs()
+            logger.info("Deleted %d api_logs rows older than %d days.", removed, LOG_RETENTION_DAYS)
+        except Exception as error:
+            logger.error("Could not delete old api_logs rows: %s", error)
         return results

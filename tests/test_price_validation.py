@@ -35,6 +35,29 @@ def test_isolated_spike_is_skipped(fake_session):
 
     assert written == 149
     assert frame_dates(frame)[90] not in stored_dates(fake_session)
+    # Stored the night before (when it was still the newest bar): removed now that it is confirmed.
+    assert fake_session.deletes == [{"symbol": "TEST", "dates": [frame_dates(frame)[90]]}]
+
+
+def test_real_moves_delete_nothing(fake_session):
+    closes = random_walk(150, 0.015)
+    closes[90:] *= 0.74
+    ingestion._store_frame("TEST", make_frame(closes))
+    assert fake_session.deletes == []
+
+
+def test_gap_fill_is_checked_against_the_stored_bar_after_it(fake_session):
+    stored_closes = random_walk(61, 0.01)
+    start = date(2023, 10, 2)
+    prior_rows = [price_row(start + timedelta(days=offset), close) for offset, close in enumerate(stored_closes)]
+    level = stored_closes[-1]
+    gap_frame = make_frame([level * 1.6], start="2024-01-02")
+    next_stored = price_row(date(2024, 1, 3), level * 1.001)
+    fake_session.reads = [list(reversed(prior_rows)), [next_stored]]
+
+    # Without the bar after the gap, a 60% jump on the last bar would be stored.
+    assert ingestion._store_frame("TEST", gap_frame) == 0
+    assert fake_session.deletes == [{"symbol": "TEST", "dates": [date(2024, 1, 2)]}]
 
 
 def test_hundredfold_glitch_is_skipped_even_without_history(fake_session):

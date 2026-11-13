@@ -17,6 +17,9 @@ from sqlalchemy import text
 from . import db
 from .db import session_scope
 
+# Rows older than this are deleted at the end of each nightly ingestion (about 3 months).
+LOG_RETENTION_DAYS = 90
+
 logger = logging.getLogger("randata")
 logger.setLevel(logging.INFO)
 
@@ -85,14 +88,15 @@ def log_event(
         )
 
 
-def get_recent_logs(session=None, days: int = 7) -> list[dict]:
-    """Structured events from `api_logs` for the last `days` days, newest first."""
+def get_recent_logs(session=None, days: int | None = 7) -> list[dict]:
+    """Structured events from `api_logs` for the last `days` days (None: every row), newest first."""
+    period = "WHERE recorded_at >= UTC_TIMESTAMP() - INTERVAL :days DAY " if days is not None else ""
     with session_scope(session) as active_session:
         rows = active_session.execute(
             text(
                 "SELECT id, recorded_at, logger, level, message, symbol, "
                 "duration_ms, rows_written, success, exception "
-                "FROM api_logs WHERE recorded_at >= UTC_TIMESTAMP() - INTERVAL :days DAY "
+                f"FROM api_logs {period}"
                 "ORDER BY recorded_at DESC"
             ),
             {"days": days},
@@ -112,3 +116,14 @@ def get_recent_logs(session=None, days: int = 7) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def delete_old_logs(days: int = LOG_RETENTION_DAYS, session=None) -> int:
+    """Delete `api_logs` rows older than `days` days. Returns how many rows were removed."""
+    with session_scope(session) as active_session:
+        result = active_session.execute(
+            text("DELETE FROM api_logs WHERE recorded_at < UTC_TIMESTAMP() - INTERVAL :days DAY"),
+            {"days": days},
+        )
+        active_session.commit()
+        return result.rowcount
