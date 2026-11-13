@@ -122,3 +122,65 @@ def test_old_logs_are_deleted_after_90_days():
     delete_old_logs(session=session)
     assert session.deletes == [{"days": 90}]
     assert session.commits == 1
+
+
+@pytest.fixture
+def empty_response_store(monkeypatch):
+    from collections import OrderedDict
+
+    from app.routers.finance import responses
+
+    monkeypatch.setattr(responses, "_compressed_responses", OrderedDict())
+
+
+def test_history_year_returns_date_ascending_columns_per_symbol(client, monkeypatch, empty_response_store):
+    rows = [
+        price_row(date(2024, 1, day), 10.0 + day, symbol=symbol)
+        for symbol in ("AAA", "BBB")
+        for day in (2, 3)
+    ]
+    monkeypatch.setattr(db, "SessionLocal", lambda: FakeSession(reads=[rows]))
+
+    body = client.get("/finance/history/year/2024").json()
+
+    assert body["year"] == 2024 and body["count"] == 4
+    assert body["symbols"]["AAA"] == {
+        "date": ["2024-01-02", "2024-01-03"], "open": [12.0, 13.0], "high": [12.0, 13.0],
+        "low": [12.0, 13.0], "close": [12.0, 13.0], "volume": [100, 100],
+    }
+    assert list(body["symbols"]) == ["AAA", "BBB"]
+
+
+def test_history_year_is_served_from_the_warmed_document(client, monkeypatch, empty_response_store):
+    this_year = date.today().year
+    monkeypatch.setattr(history_endpoints, "HISTORY_YEARS", 0)
+    monkeypatch.setattr(db, "SessionLocal", lambda: FakeSession(reads=[[price_row(date(this_year, 1, 2), 5.0)]]))
+    history_endpoints.warm_history_years()
+
+    # The database now has nothing left to answer: the response must come from the warmed document.
+    monkeypatch.setattr(db, "SessionLocal", lambda: FakeSession())
+    body = client.get(f"/finance/history/year/{this_year}").json()
+
+    assert body["symbols"]["TEST"]["close"] == [5.0]
+
+
+def test_concurrent_requests_build_a_document_once(empty_response_store):
+    import threading
+    import time
+
+    from app.routers.finance import responses
+
+    builds = []
+
+    def produce():
+        builds.append(1)
+        time.sleep(0.2)
+        return {"value": 1}
+
+    threads = [threading.Thread(target=responses.compressed_document, args=("test:once", produce)) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(builds) == 1

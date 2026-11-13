@@ -8,16 +8,21 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ... import cache, catalog, db, price_repository
+from ...config import HISTORY_YEARS
 from ...db import get_db
-from ...logging_config import LOG_RETENTION_DAYS, get_recent_logs
+from ...logging_config import LOG_RETENTION_DAYS, get_logger, get_recent_logs
 from ...price_repository import price_bar_to_dict
 from . import examples
-from .responses import cached_json_response
+from .responses import cached_json_response, compressed_document
 
 router = APIRouter()
+logger = get_logger("history")
 
 HISTORY_RANGE_MAX_ROWS = 50000
+# One calendar year holds ~47k bars today; this only guards memory against a runaway catalogue.
+HISTORY_YEAR_MAX_ROWS = 500000
 _STREAM_CHUNK_ROWS = 2000
+_BAR_FIELDS = ("date", "open", "high", "low", "close", "volume")
 
 
 def _too_many_rows() -> HTTPException:
@@ -130,6 +135,69 @@ def get_history_range(
                 "data": data, "source": "database"}
 
     return cached_json_response(request, f"history_range:{from_date}:{to_date}", produce)
+
+
+def _history_year_key(year: int) -> str:
+    return f"history_year:{year}"
+
+
+def _history_year_document(year: int) -> dict:
+    """Every stored bar of one calendar year, per symbol, as parallel date-ascending columns."""
+    rows = price_repository.get_bars_between(
+        date(year, 1, 1), date(year, 12, 31), HISTORY_YEAR_MAX_ROWS + 1
+    )
+    if len(rows) > HISTORY_YEAR_MAX_ROWS:
+        raise HTTPException(status_code=413, detail=f"Year {year} exceeds the {HISTORY_YEAR_MAX_ROWS:,}-row limit.")
+    symbols = {}
+    for row in rows:
+        columns = symbols.get(row.symbol)
+        if columns is None:
+            columns = symbols[row.symbol] = {field: [] for field in _BAR_FIELDS}
+        for field, value in price_bar_to_dict(row).items():
+            columns[field].append(value)
+    return {"year": year, "count": len(rows), "symbols": symbols}
+
+
+def warm_history_years() -> None:
+    """Build the calendar-year documents of the stored history window ahead of any request.
+
+    Run in the background after each cache load: reading a year from the
+    database takes several seconds on the hosted instance, so clients doing a
+    full load then download prepared documents instead of waiting on it.
+    """
+    if db.SessionLocal is None:
+        return
+    this_year = date.today().year
+    for year in range(this_year, this_year - HISTORY_YEARS - 1, -1):
+        try:
+            compressed_document(_history_year_key(year), lambda: _history_year_document(year))
+        except Exception as error:
+            logger.warning("Could not prepare the %d history document: %s", year, error)
+    logger.info("History year documents prepared (%d-%d).", this_year - HISTORY_YEARS, this_year)
+
+
+cache.after_load_callbacks.append(warm_history_years)
+
+
+@router.get(
+    "/history/year/{year}",
+    summary="One calendar year of history (all assets, column format)",
+    description=(
+        "Returns every stored daily bar of one calendar year for every asset, grouped per symbol "
+        "as parallel arrays sorted by date (oldest first): "
+        "`symbols[symbol] = {date: [...], open: [...], high: [...], low: [...], close: [...], volume: [...]}`. "
+        "A year without data returns an empty `symbols` object.\n\n"
+        "This is the fast path for loading the full history: the years of the stored window are "
+        "prepared in memory after every cache reload, so requests (also in parallel) do not wait "
+        "on the database. The column format is about half the size of the row format of "
+        "`/finance/history/range`."
+    ),
+)
+def get_history_year(
+    request: Request,
+    year: int = Path(..., ge=1970, le=2200, description="Calendar year.", examples=[2024]),
+):
+    return cached_json_response(request, _history_year_key(year), lambda: _history_year_document(year))
 
 
 @router.get(

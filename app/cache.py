@@ -22,6 +22,8 @@ _CACHE_HISTORY_DAYS = 365 * CACHE_HISTORY_YEARS
 _lock = threading.Lock()
 _cache: dict[str, list[dict]] = {}
 _loaded_at: datetime | None = None
+# Functions run in a background thread after every successful load (e.g. preparing responses).
+after_load_callbacks: list = []
 
 
 def window_start() -> date:
@@ -49,6 +51,8 @@ def load() -> bool:
         "Cache loaded: %d symbols, %d rows, refreshed at %s",
         len(new_cache), total_rows, _loaded_at.isoformat(),
     )
+    for callback in after_load_callbacks:
+        threading.Thread(target=callback, name=f"after-cache-load:{callback.__name__}", daemon=True).start()
     return True
 
 
