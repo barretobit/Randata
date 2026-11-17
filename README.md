@@ -228,6 +228,5 @@ This project is licensed under the MIT License, see the [LICENSE](LICENSE) file 
 
 Made with 💚 by João Barreto.
 
-- **Email:** barretobit@gmail.com
 - **LinkedIn:** [linkedin.com/in/barretobit](linkedin.com/in/barretobit)
 - **GitHub:** [github.com/barretobit](github.com/barretobit)
