@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from ... import cache, catalog, db, price_repository
+from ... import cache, catalog, db, dividend_repository, price_repository
 from ...config import HISTORY_YEARS
 from ...db import get_db
 from ...logging_config import LOG_RETENTION_DAYS, get_logger, get_recent_logs
@@ -198,6 +198,55 @@ def get_history_year(
     year: int = Path(..., ge=1970, le=2200, description="Calendar year.", examples=[2024]),
 ):
     return cached_json_response(request, _history_year_key(year), lambda: _history_year_document(year))
+
+
+_DIVIDENDS_KEY = "dividends"
+
+
+def _dividends_document() -> dict:
+    """Every stored dividend of the history window, per symbol, as parallel date-ascending columns."""
+    start = date(date.today().year - HISTORY_YEARS, 1, 1)
+    symbols = {}
+    rows = dividend_repository.get_dividends_since(start)
+    for row in rows:
+        columns = symbols.get(row.symbol)
+        if columns is None:
+            columns = symbols[row.symbol] = {"date": [], "amount": []}
+        columns["date"].append(row.date.isoformat())
+        columns["amount"].append(float(row.amount))
+    return {"count": len(rows), "symbols": symbols}
+
+
+def warm_dividends() -> None:
+    """Prepare the dividends document after each cache load, so it keeps serving while the database is down."""
+    if db.SessionLocal is None:
+        return
+    try:
+        compressed_document(_DIVIDENDS_KEY, _dividends_document)
+    except Exception as error:
+        logger.warning("Could not prepare the dividends document: %s", error)
+
+
+cache.after_load_callbacks.append(warm_dividends)
+
+
+@router.get(
+    "/dividends",
+    summary="Cash dividends per share (all assets, column format)",
+    description=(
+        "Returns every stored cash dividend of the history window, grouped per symbol as parallel "
+        "arrays sorted by ex-dividend date: `symbols[symbol] = {date: [...], amount: [...]}`. "
+        "`amount` is per share, in the same currency as the symbol's prices. Prices are dividend "
+        "adjusted, so a holder's real return is the price change plus these payments.\n\n"
+        "Prepared in memory after every cache reload, like the history year documents."
+    ),
+)
+def get_dividends(request: Request):
+    try:
+        return cached_json_response(request, _DIVIDENDS_KEY, _dividends_document)
+    except Exception as error:
+        logger.warning("Dividends are unavailable: %s", error)
+        raise HTTPException(status_code=503, detail="Dividends are unavailable right now.")
 
 
 @router.get(

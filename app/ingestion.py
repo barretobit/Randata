@@ -14,7 +14,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from . import price_repository, yahoo
+from . import dividend_repository, price_repository, yahoo
 from .asset_repository import get_all_assets, get_assets_missing_inception, set_inception_date
 from .config import (
     BACKFILL_DELAY_SECONDS,
@@ -147,6 +147,7 @@ def _store_frame(symbol: str, frame: pd.DataFrame) -> int:
             continue
         bars_to_store.append(bar)
     price_repository.upsert_bars(bars_to_store)
+    _store_dividends(symbol, frame)
     removed = price_repository.delete_bars(symbol, spike_dates)
     if removed:
         _log_warning(
@@ -155,6 +156,27 @@ def _store_frame(symbol: str, frame: pd.DataFrame) -> int:
             f"(checked dates: {', '.join(map(str, spike_dates))}).",
         )
     return len(bars_to_store)
+
+
+def _store_dividends(symbol: str, frame: pd.DataFrame) -> int:
+    """Upsert the frame's cash dividends (Yahoo's "Dividends" column, keyed by ex-date).
+
+    Never raises: a missing `dividends` table or a database hiccup is logged,
+    so it can never stop the price bars from being stored.
+    """
+    if "Dividends" not in frame.columns:
+        return 0
+    dividends = []
+    for timestamp, value in frame["Dividends"].items():
+        amount = finite_number(value)
+        if amount is not None and amount > 0:
+            dividends.append({"symbol": symbol, "date": timestamp.date(), "amount": amount})
+    try:
+        dividend_repository.upsert_dividends(dividends)
+    except Exception as error:
+        _log_warning(symbol, f"Could not store {len(dividends)} dividend(s) for {symbol}: {error}")
+        return 0
+    return len(dividends)
 
 
 def _fetch_and_store(

@@ -110,6 +110,7 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/history/all`              | Full dump, every stored bar, all assets (default cap 50,000 rows, `limit` up to 500,000; streamed, so `count`/`from`/`to` follow `data`) |
 | GET    | `/finance/history/range?from&to`    | Up to 50,000 bars between two dates, all assets (HTTP 413 if exceeded; served from cache when `from` is within the cache window, else DB) |
 | GET    | `/finance/history/year/{year}`      | One calendar year, all assets, per symbol as date-ascending columns (`date`, `open`, `high`, `low`, `close`, `volume`); prepared in memory after every cache load |
+| GET    | `/finance/dividends`                | Cash dividends per share for the history window, per symbol as date-ascending columns (`date` = ex-dividend day, `amount` in the price currency); prepared in memory after every cache load, HTTP 503 when unavailable |
 | GET    | `/finance/symbol/{symbol}`          | Latest bar for any stored symbol (incl. ad-hoc additions)         |
 | GET    | `/finance/symbol/{symbol}/history`  | Full history for any stored symbol                                |
 | GET    | `/finance/assets`                   | Full catalogue of tracked assets, grouped by type                 |
@@ -125,6 +126,8 @@ The list above is the catalogue available today. More assets (stocks, ETFs, FX p
 | GET    | `/finance/cache/{symbol}`           | One symbol's history from the cache                               |
 
 For an existing database, run `sql/migrate_finance_schema.sql` once to add the `assets.inception_date` column and the daily-price date index. New databases get both from the create-table scripts.
+
+Dividends need the `dividends` table: run `sql/create_dividends_table.sql` once, deploy, then run `POST /finance/admin/backfill` once so every asset's stored window collects its dividends. From then on the nightly ingestion keeps them current. Until the table exists, ingestion logs a warning and keeps storing prices.
 
 ## Admin endpoints (require the `X-Admin-Key` header)
 
@@ -163,6 +166,8 @@ Each nightly run fills assets missing their expected history, scans stored dates
 During ingestion, invalid OHLC bars are skipped. A bar is also skipped as a **spike** when its close jumps abnormally away from the previous close *and* the next close comes back at least halfway with another abnormal move. Real moves (earnings gaps, crashes, rallies) stay at their new level and are kept. A move is abnormal above the absolute `PRICE_HARD_MAX_RETURN` limit (default 80%), or, after at least `PRICE_OUTLIER_MIN_SAMPLES` recent moves (default 20), beyond the larger of `PRICE_OUTLIER_SIGMA` robust standard deviations (default 8) or the minimum return floor (default 2%). The newest bar has no next bar yet, so it is only held back above the hard limit; the overlap window re-checks it the next night, and if it then turns out to be a spike it is deleted from the database. When filling a gap, the stored bar right after the gap serves as that next bar. Skipped and deleted bars are logged.
 
 Prices are split- and dividend-adjusted by Yahoo. When the overlap window shows that Yahoo rescaled closes the database already holds (a split or dividend), the nightly run re-fetches that asset's full history window instead of appending to the old scale.
+
+Every Yahoo download also carries the cash dividends (its `Dividends` column, keyed by ex-dividend date, in the same unit as the prices). They are stored in the `dividends` table with no extra Yahoo calls, so backfills and the nightly window keep them current.
 
 ## In-memory cache
 
@@ -204,6 +209,7 @@ Yahoo errors (network failures, unknown symbols, failed price adjustment) are ra
 | `app/db.py` | Database engine and sessions |
 | `app/asset_repository.py` | SQL for the `assets` table |
 | `app/price_repository.py` | SQL for the `daily_prices` table |
+| `app/dividend_repository.py` | SQL for the `dividends` table |
 | `app/yahoo.py` | Yahoo Finance client: downloads with retries, symbol checks, inception dates |
 | `app/price_validation.py` | Bar checks: OHLC structure and isolated price spikes |
 | `app/ingestion.py` | Jobs: backfills, nightly update, history audit and repair |
